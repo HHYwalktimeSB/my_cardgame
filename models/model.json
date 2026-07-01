@@ -1,0 +1,13 @@
+{
+  "rdbms": "postgresql",
+  "host": "127.0.0.1",
+  "port": 5432,
+  "dbname": "cardgame_db",
+  "user": "cardgame_user",
+  "passwd": "cardgame_password",
+  "tables": [],
+  "relationships": {
+    "enabled": false,
+    "items": []
+  }
+}
