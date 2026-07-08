@@ -3,6 +3,9 @@
 
 #include<atomic>
 #include<utility>
+#include<map>
+#include<bits/shared_ptr.h>
+#include<optional>
 
 template<typename T>
 class lockfree_queue{
@@ -94,151 +97,130 @@ class lockfree_queue{
     }
 };
 
-/*
-enum class HashmapInsertRes{InsertSuccess, InsertFail_NoPos, InsertFail_KeyExist};
-
 template<typename KeyType, typename ValueType>
-class lockfree_hashmap{
-    protected:
-    enum {sEmpty, sOccupied, sWorking, sDeleted, sReading};
+class my_hashmap{
+    private:
     size_t capacity;
-    struct Bucket{
-        std::atomic<uint8_t> state;
-        KeyType key;
-        ValueType value;
-    };
-    Bucket* buckets;
-    std::hash<KeyType> hasher;
-    inline HashmapInsertRes find_slot_lf(const KeyType& key, size_t& _index_r){
-        size_t index = hasher(key) % capacity;
-        for (size_t i = 0; i < capacity; ++i) {
-        Bucket& bucket = buckets[index];
-        uint8_t state = bucket.state.load(std::memory_order_acquire);
+    using bucket_ty = std::map<KeyType, ValueType>;
 
-        if (state == sOccupied && bucket.key == key) {
-            return HashmapInsertRes::InsertFail_KeyExist;
+    class Bucket_struct{
+        private:
+        Bucket_struct(const Bucket_struct& o):reference_count(0),val(o.val) { }
+        public:
+        std::atomic<int> reference_count;
+        bucket_ty val;
+        Bucket_struct():reference_count(0){
         }
-        if (state == sEmpty || state == sDeleted) {
-            uint8_t expected = state;
-            if (bucket.state.compare_exchange_strong(expected, sWorking, std::memory_order_acquire))
+        ~Bucket_struct()=default;
+        static Bucket_struct* allocate(){return new Bucket_struct;}
+        Bucket_struct* make_copy(){
+            return new Bucket_struct(*this);
+        }
+        class bucket_refclass{
+            Bucket_struct* ref;
+            bucket_refclass(Bucket_struct* _p):ref(_p){
+            }
+            public:
+            bucket_refclass(const bucket_refclass& _p):ref(_p.ref){
+                ref->reference_count.fetch_add(1);
+            }
+            bucket_refclass copy(){
+                Bucket_struct* pstruct = ref->make_copy();
+                return bucket_refclass(pstruct);
+            }
+            ~bucket_refclass(){
+                if(ref->reference_count.fetch_sub(1) == 1)
+                    delete ref;
+            }
+            inline void retain(){
+                ref->reference_count.fetch_add(1);
+            }
+            const bucket_ty* operator->()const {return &(ref->val); }
+            bucket_ty* operator->() {return &(ref->val); }
+            friend class Bucket_struct::atomic_bucket_ref;
+        };
+        class atomic_bucket_ref{
+            std::atomic<Bucket_struct*> ref;
+            public:
+            atomic_bucket_ref(Bucket_struct* _p):ref(_p){
+                auto ptr = ref.load();
+                ptr->reference_count.fetch_add(1);
+            }
+            ~atomic_bucket_ref(){
+                auto ptr = ref.load();
+                if(ptr->reference_count.fetch_add(1)==1)
+                    delete ptr;
+            }
+            bool cas(bucket_refclass& old, const bucket_refclass& _new)
             {
-                _index_r = index;
-                return HashmapInsertRes::InsertSuccess;
+                Bucket_struct* tmp = old.ref;
+                if(ref.compare_exchange_strong(tmp, _new.ref)){
+                    _new.ref->reference_count.fetch_add(1);
+                    old.~bucket_refclass();//in this case we decrease reference count of old
+                    return true;
+                }
+                else{
+                    tmp->reference_count.fetch_add(1);
+                    old.~bucket_refclass();
+                    old.ref = tmp;
+                    return false;
+                }
             }
-        }
-        index = (index + 1) % capacity;
-        }
-        return HashmapInsertRes::InsertFail_NoPos;
-    }
-
+            inline const bucket_refclass load(){
+                Bucket_struct& tmp = *ref.load();
+                tmp.reference_count.fetch_add(1);
+                return bucket_refclass(&tmp);
+            }
+        };
+    };
+    using bucket_reference = typename Bucket_struct::bucket_refclass;
+    using atomic_bucket_reference = typename Bucket_struct::atomic_bucket_ref;
+   atomic_bucket_reference* buckets;
     public:
-    lockfree_hashmap(size_t size):capacity(size){
-        buckets = (Bucket*)operator new(sizeof(Bucket)* size);
-        for(size_t i = 0; i < size; ++i)
-            new (&buckets[i].state) (sEmpty);
+    my_hashmap(size_t count_buckets){
+        capacity = count_buckets;
+        buckets = (atomic_bucket_reference*) operator new(sizeof(atomic_bucket_reference) * capacity);
+        for(size_t i=0;i<count_buckets;++i)new(&buckets[i]) atomic_bucket_reference(Bucket_struct::allocate());
+    }
+    my_hashmap(const my_hashmap&)=delete;
+    ~my_hashmap(){
+        delete[] buckets;
+    }
+    std::optional<ValueType> find(const KeyType& key){
+        size_t index = hasher(key) % capacity;
+        bucket_reference data(buckets[index].load());
+        auto it = data->find(key);
+        if(it != data->end())return it->second;
+        return std::nullopt;
     }
 
-    HashmapInsertRes insert(const KeyType & key, const ValueType& value){
-        size_t index;
-        auto r = find_slot_lf(key, index);
-        if(r == HashmapInsertRes::InsertSuccess){
-            new (&buckets[index].key) KeyType(key);
-            new (&buckets[index].value) ValueType(value);
-            buckets[index].state.store(sOccupied, std::memory_order_release);
-        }
-        return r;
-    }
-    HashmapInsertRes insert(const KeyType & key, ValueType&& value){
-        size_t index;
-        auto r = find_slot_lf(key, index);
-        if(r == HashmapInsertRes::InsertSuccess){
-            new (&buckets[index].key) KeyType(key);
-            new (&buckets[index].value) ValueType(std::move(value));
-            buckets[index].state.store(sOccupied, std::memory_order_release);
-        }
-        return r;
-    }
-    
-    std::optional<ValueType> find(const KeyType& key) {
-    size_t index = hasher(key) % capacity;
-
-    for (size_t i = 0; i < capacity; ++i) {
-        Bucket& bucket = buckets[index];
-        uint8_t state = bucket.state.load(std::memory_order_acquire);
-
-        if (state == sEmpty) {
-            return std::nullopt;
-        }
-        if (state == sOccupied && bucket.key == key) {
-            return bucket.value;
-        }
-        index = (index + 1) % capacity;
-    }
-
-    return std::nullopt;
-    }
-
-    std::optional<ValueType> find_and_remove(const KeyType& key) {
-    size_t index = hasher(key) % capacity;
-
-    for (size_t i = 0; i < capacity; ++i) {
-        Bucket& bucket = buckets[index];
-        uint8_t state = bucket.state.load(std::memory_order_acquire);
-
-        if (state == sEmpty) {
-            return std::nullopt;
-        }
-        if (state == sOccupied && bucket.key == key) {
-            if(bucket.state.compare_exchange_strong(state, sWorking, std::memory_order_acquire)){
-                bucket.key.~KeyType();
-                ValueType ret(std::move(bucket.value));
-                bucket.value.~ValueType();
-                bucket.state.store(sDeleted, std::memory_order_release);
-                return ret;
-            }
-            else return std::nullopt;
-        }
-        index = (index + 1) % capacity;
-    }
-
-    return std::nullopt;
+    bool insert(const KeyType & key, const ValueType& val){
+        std::pair<KeyType, ValueType> elem(key,val);
+        size_t index = hasher(key) % capacity;
+        bucket_reference old(buckets[index].load());
+        do{
+            auto new_data = old.copy();
+            if(!new_data->insert(elem).second)return false;
+            if(buckets[index].cas(old, new_data))break;
+        }while(1);
+        return true;
     }
 
     bool remove(const KeyType& key){
         size_t index = hasher(key) % capacity;
-
-    for (size_t i = 0; i < capacity; ++i) {
-        Bucket& bucket = buckets[index];
-        uint8_t state = bucket.state.load(std::memory_order_acquire);
-
-        if (state == sEmpty) {
-            return false;
-        }
-        if (state == sOccupied && bucket.key == key) {
-            if(bucket.state.compare_exchange_strong(state, sWorking, std::memory_order_acquire)){
-                bucket.key.~KeyType();
-                bucket.value.~ValueType();
-                bucket.state.store(sDeleted, std::memory_order_release);
-                return true;
-            }
-            else return false;
-        }
-        index = (index + 1) % capacity;
-    }
-    return false;
+        bucket_reference old(buckets[index].load());
+        //auto new_data = old.copy();
+        do{
+            auto new_data = old.copy();
+            auto it = new_data->find(key);
+            if(it==new_data->end())return false;
+            new_data->erase(it);
+            if(buckets[index].cas(old, new_data))break;
+        }while(1);
+        return true;
     }
 
-    ~lockfree_hashmap(){
-        //assume no thread working on hash map 
-        for (size_t i = 0; i < capacity; ++i) {
-            Bucket& bucket = buckets[i];
-            if(bucket.state == sOccupied){
-                bucket.key.~KeyType();
-                bucket.value.~ValueType();
-            }
-        }
-        operator delete(buckets);
-    }
+    std::hash<KeyType> hasher;
 };
-*/
+
 #endif

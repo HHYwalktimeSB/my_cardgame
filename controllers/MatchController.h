@@ -67,6 +67,7 @@ class MatchmakingService{
         Match match;
     };
     PollRegisterResult RegisterPoll(int64_t userid, const ResponseCallback& cb);
+    static bool is_player_in_match(int64_t userid);
 };
 
 class MatchController : public drogon::HttpController<MatchController>

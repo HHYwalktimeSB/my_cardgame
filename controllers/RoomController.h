@@ -13,6 +13,8 @@ public:
     ADD_METHOD_TO(RoomController::stat, "/battleroom/{1:roomid}/stat", Get);
     ADD_METHOD_TO(RoomController::snapshot, "/battleroom/{1:roomid}/snapshot", Get);
     ADD_METHOD_TO(RoomController::operation, "/battleroom/{1:roomid}/operation", Post);
+    ADD_METHOD_TO(RoomController::leave, "/battleroom/{1:roomid}/leave", Post);
+    ADD_METHOD_TO(RoomController::get_current, "/battleroom/current", Get);
     METHOD_LIST_END
 
     void poll(
@@ -34,6 +36,15 @@ public:
         const HttpRequestPtr &req,
         std::function<void(const HttpResponsePtr &)> &&callback,
         const std::string& roomid
+    );
+    void leave(
+        const HttpRequestPtr &req,
+        std::function<void(const HttpResponsePtr &)> &&callback,
+        const std::string& roomid
+    );
+    void get_current(
+        const HttpRequestPtr &req,
+        std::function<void(const HttpResponsePtr &)> &&callback
     );
     protected:
     std::shared_ptr<BattleRoom> getroom_(int64_t roomid, int64_t userid, bool & success,

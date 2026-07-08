@@ -1,16 +1,17 @@
 #include "RoomController.h"
+#include "session_check.h"
 
 void RoomController::poll(const HttpRequestPtr &req, std::function<void(const HttpResponsePtr &)> &&callback, const std::string &str_roomid)
 {
-    auto userId = req->session()->getOptional<int64_t>("user_id");
-    if(!userId){
+    int64_t userId;
+    if(MySessionChecker::check_session(req, userId) != MySessionChecker::SessionOk){
         this->respond_w_error("not logged in", k401Unauthorized, callback);
         return;
     }
     bool success;
     int64_t roomId = this->str_roomid_to_int(str_roomid, callback);
     if(roomId < 0)return;
-    auto room = getroom_(roomId, *userId, success, callback);
+    auto room = getroom_(roomId, userId, success, callback);
     if(!success)return;
     auto args = req->getJsonObject();
     if(!args){
@@ -19,7 +20,7 @@ void RoomController::poll(const HttpRequestPtr &req, std::function<void(const Ht
     }
     uint64_t seq = (*args)["sequence"].asInt64();
     auto resp = HttpResponse::newHttpJsonResponse(
-        room->getEventsAfterJson(seq, *userId, success));
+        room->getEventsAfterJson(seq, userId, success));
     if(success)resp->setStatusCode(k200OK);
     else resp->setStatusCode(k401Unauthorized);
     callback(resp);
@@ -58,18 +59,18 @@ void RoomController::stat(const HttpRequestPtr &req, std::function<void(const Ht
 
 void RoomController::snapshot(const HttpRequestPtr &req, std::function<void(const HttpResponsePtr &)> &&callback, const std::string &str_roomid)
 {
-    auto userId = req->session()->getOptional<int64_t>("user_id");
-    if(!userId){
+    int64_t userId;
+    if(MySessionChecker::check_session(req, userId) != MySessionChecker::SessionOk){
         this->respond_w_error("not logged in", k401Unauthorized, callback);
         return;
     }
     bool success;
     int64_t roomId = this->str_roomid_to_int(str_roomid, callback);
     if(roomId < 0)return;
-    auto room = getroom_(roomId, *userId, success, callback);
+    auto room = getroom_(roomId, userId, success, callback);
     if(!success)return;
     auto resp = HttpResponse::newHttpJsonResponse(
-        room->getSnapshotJson(*userId, success));
+        room->getSnapshotJson(userId, success));
     if(success)resp->setStatusCode(k200OK);
     else resp->setStatusCode(k401Unauthorized);
     callback(resp);
@@ -77,15 +78,15 @@ void RoomController::snapshot(const HttpRequestPtr &req, std::function<void(cons
 
 void RoomController::operation(const HttpRequestPtr &req, std::function<void(const HttpResponsePtr &)> &&callback, const std::string &str_roomid)
 {
-    auto userId = req->session()->getOptional<int64_t>("user_id");
-    if(!userId){
+    int64_t userId;
+    if(MySessionChecker::check_session(req, userId) != MySessionChecker::SessionOk){
         this->respond_w_error("not logged in", k401Unauthorized, callback);
         return;
     }
     bool success;
     int64_t roomId = this->str_roomid_to_int(str_roomid, callback);
     if(roomId < 0)return;
-    auto room = getroom_(roomId, *userId, success, callback);
+    auto room = getroom_(roomId, userId, success, callback);
     if(!success)return;
     auto args = req->getJsonObject();
     if(!args){
@@ -107,7 +108,7 @@ void RoomController::operation(const HttpRequestPtr &req, std::function<void(con
         respond_w_error("invaild arguments", k400BadRequest,callback);
         return;
     }
-    auto result = room->applyOperation(*userId, op);
+    auto result = room->applyOperation(userId, op);
     Json::Value res;
     success = false;
     switch(result.error){
@@ -132,15 +133,84 @@ void RoomController::operation(const HttpRequestPtr &req, std::function<void(con
         case BattleRoom::ActionError::StaleVersion:
         res["action_error"] = "StaleVersion";
         break;
-        break;
         default:
         success = true;
     }
-    if(!success){
+    if(success){
         res["state"] = "SUCCESS";
         res["version"] = result.version;
         res["events"] = BattleRoom::eventListToJson(result.generatedEvents);
+        if(room->isFinished())
+            RoomService::GetServer().scheduleFinishedRoomCleanup(roomId);
     }else res["state"] = "FAIL";
+    auto resp = HttpResponse::newHttpJsonResponse(res);
+    callback(resp);
+}
+
+void RoomController::leave(const HttpRequestPtr &req, std::function<void(const HttpResponsePtr &)> &&callback, const std::string &str_roomid)
+{
+    int64_t userId;
+    if(MySessionChecker::check_session(req, userId) != MySessionChecker::SessionOk){
+        this->respond_w_error("not logged in", k401Unauthorized, callback);
+        return;
+    }
+    bool success;
+    int64_t roomId = this->str_roomid_to_int(str_roomid, callback);
+    if(roomId < 0)return;
+    auto room = getroom_(roomId, userId, success, callback);
+    if(!success)return;
+    if(!room->isFinished()){
+        respond_w_error("room not finished", k409Conflict, callback);
+        return;
+    }
+    if(!RoomService::GetServer().playerLeaveRoom(roomId, userId)){
+        respond_w_error("leave room failed", k400BadRequest, callback);
+        return;
+    }
+    Json::Value res;
+    res["state"] = "SUCCESS";
+    auto resp = HttpResponse::newHttpJsonResponse(res);
+    callback(resp);
+}
+
+void RoomController::get_current(const HttpRequestPtr &req, std::function<void(const HttpResponsePtr &)> &&callback)
+{
+    int64_t userId;
+    if(MySessionChecker::check_session(req, userId) != MySessionChecker::SessionOk){
+        this->respond_w_error("not logged in", k401Unauthorized, callback);
+        return;
+    }
+    Json::Value res;
+    res["state"] = "SUCCESS";
+    auto room = RoomService::GetServer().findRoomByPlayer(userId);
+    if(room){
+        auto xx = room->quickStateGetting(userId);
+        if(!xx.function_success){
+            res["in_room"] = false;
+            auto resp = HttpResponse::newHttpJsonResponse(res);
+            callback(resp);
+            return;
+        }
+        res["in_room"] = true;
+        res["room_id"] = xx.roomId;
+        res["match_id"] = xx.matchId;
+        res["opponent_id"] = xx.opponentId;
+        switch (xx.state)
+        {
+        case BattleRoom::RoomStatus::Playing:
+            res["room_state"] = "playing";
+            break;
+        case BattleRoom::RoomStatus::Preparing:
+            res["room_state"] = "perparing";
+            break;
+        case BattleRoom::RoomStatus::Finished: 
+            res["room_state"] = "finished";
+            break;
+        default:
+            res["room_state"] = "unknow";
+            break;
+        }
+    }else res["in_room"] = false;
     auto resp = HttpResponse::newHttpJsonResponse(res);
     callback(resp);
 }

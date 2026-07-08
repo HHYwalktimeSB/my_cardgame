@@ -3,6 +3,7 @@
 #include <openssl/sha.h>
 #include <iomanip>
 #include <sstream>
+#include"session_check.h"
 
 using namespace drogon;
 using namespace drogon::orm;
@@ -10,20 +11,23 @@ using namespace drogon_model::cardgame_db;
 
 using ResponseCallback = std::function<void(const drogon::HttpResponsePtr &)>;
 
-void sendTextResponse(const ResponseCallback& callback,
+void sendJsonResponse(const ResponseCallback& callback,
     drogon::HttpStatusCode code,
     const std::string &message)
 {
-    auto resp = drogon::HttpResponse::newHttpResponse();
+    Json::Value json;
+    json["state"] = code >= drogon::k400BadRequest ? "ERROR" : "SUCCESS";
+    json["message"] = message;
+
+    auto resp = drogon::HttpResponse::newHttpJsonResponse(json);
     resp->setStatusCode(code);
-    resp->setBody(message);
     callback(resp);
 }
 
 auto makeDbExceptionHandler(ResponseCallback callback){
     return [callback](const drogon::orm::DrogonDbException &e)->void
     {
-        sendTextResponse(
+        sendJsonResponse(
             callback,
             drogon::k500InternalServerError,
             e.base().what());
@@ -65,7 +69,7 @@ void UserController::registerUser(
 
     if(username.empty() || password.empty())
     {
-        sendTextResponse(cb, k400BadRequest, "Need username and password!");
+        sendJsonResponse(cb, k400BadRequest, "Need username and password!");
         return;
     }
 
@@ -78,7 +82,7 @@ void UserController::registerUser(
         {//callback for correct
             if(!users.empty())
             {
-                sendTextResponse(cb, k400BadRequest, "User exists!");
+                sendJsonResponse(cb, k400BadRequest, "User exists!");
                 return;
             }
 
@@ -90,7 +94,7 @@ void UserController::registerUser(
             Pmapper->insert(user,
                 [cb](Users)->void
                 {
-                    sendTextResponse(cb, k200OK, "Success!");
+                    sendJsonResponse(cb, k200OK, "Success!");
                 },
                 makeDbExceptionHandler(cb));
         },
@@ -101,13 +105,26 @@ void UserController::loginUser(
     const HttpRequestPtr &req,
     std::function<void(const HttpResponsePtr &)> &&callback)
 {
+    {
+        int64_t userid;
+        switch (MySessionChecker::check_session(req, userid))
+        {
+        case MySessionChecker::ErrInvaildToken:
+            req->session()->erase("user_id");
+            req->session()->erase("req_token");
+            break;
+        case MySessionChecker::SessionOk:
+            sendJsonResponse(callback, k409Conflict, "Error, logged in");
+            return;
+        }
+    }
     auto username = req->getParameter("username");
     auto password = req->getParameter("password");
     auto cb = std::move(callback);
 
     if(username.empty() || password.empty())
     {
-        sendTextResponse(cb, k400BadRequest, "Need username and password!");
+        sendJsonResponse(cb, k400BadRequest, "Need username and password!");
         return;
     }
 
@@ -122,7 +139,7 @@ void UserController::loginUser(
         {
             if(users.empty())
             {
-                sendTextResponse(cb,k401Unauthorized,"Invalid username");
+                sendJsonResponse(cb,k401Unauthorized,"Invalid username");
                 return;
             }
 
@@ -130,13 +147,13 @@ void UserController::loginUser(
 
             if(user.getValueOfPasswordHash() != password)
             {
-                sendTextResponse(cb, k401Unauthorized, "Incorrect password");
+                sendJsonResponse(cb, k401Unauthorized, "Incorrect password");
                 return;
             }
 
-            req->session()->insert("user_id", user.getValueOfId());
-
-            sendTextResponse(cb, k200OK, "login success");
+            if(MySessionChecker::write_session_info(req, user.getValueOfId()))
+            sendJsonResponse(cb, k200OK, "login success");
+            else sendJsonResponse(cb, k409Conflict, "cannot login");
         },
         makeDbExceptionHandler(cb));
 }
@@ -147,25 +164,30 @@ void UserController::status(
 {
     ResponseCallback cb = std::move(callback);
 
-    auto userid = req->session()->getOptional<int64_t>("user_id");
+    int64_t userid;
+    switch(MySessionChecker::check_session(req, userid)){
+        case MySessionChecker::ErrNotLogin:
+        sendJsonResponse(cb, k401Unauthorized, "Error! not logged in");
+        return;
+        case MySessionChecker::ErrInvaildToken:
+        sendJsonResponse(cb, k401Unauthorized, "Error! invaild session token");
+        return;
+        case MySessionChecker::SessionOk:
+        break;
+    }
+
     auto client = app().getDbClient("db");
     auto mapper = std::make_shared<Mapper<Users>>(client);
 
-    if(!userid)
-    {
-        sendTextResponse(cb, k401Unauthorized, "Not logged in");
-        return;
-    }
-
     mapper->findBy(
-        Criteria(Users::Cols::_id, CompareOperator::EQ, *userid),
+        Criteria(Users::Cols::_id, CompareOperator::EQ, userid),
         [cb](std::vector<Users> users)->void
         {
             if(users.empty()){
-                sendTextResponse(cb, k400BadRequest, "Session Error! User not exist!");
+                sendJsonResponse(cb, k400BadRequest, "Session Error! User not exist!");
                 return;
             }
-            sendTextResponse(cb, k200OK, "Logged in as " + users[0].getValueOfUsername());
+            sendJsonResponse(cb, k200OK, "Logged in as " + users[0].getValueOfUsername());
         },
         makeDbExceptionHandler(cb));
 }
@@ -174,14 +196,17 @@ void UserController::logout(
     const HttpRequestPtr &req,
     std::function<void(const HttpResponsePtr &)> &&callback)
 {
-    auto userid = req->session()->getOptional<int64_t>("user_id");
-    ResponseCallback cb = std::move(callback);
+    int64_t userid;
+    switch(MySessionChecker::check_session(req, userid)){
+        case MySessionChecker::ErrNotLogin:
+        sendJsonResponse(callback, k401Unauthorized, "Error! not logged in");
+        return;
+        case MySessionChecker::ErrInvaildToken:
+        sendJsonResponse(callback, k401Unauthorized, "Error! invaild session token");
+        return;
+        case MySessionChecker::SessionOk:
+        MySessionChecker::erase_session_info(req);
+        sendJsonResponse(callback, k200OK, "Logout success");
 
-    if(!userid){
-        sendTextResponse(cb, k401Unauthorized, "Not logged in");
-    }
-    else{
-        req->session()->erase("user_id");
-        sendTextResponse(cb, k200OK, "Logout Success");
     }
 }

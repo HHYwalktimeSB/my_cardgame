@@ -1,6 +1,9 @@
 #include "RoomService.h"
 #include<algorithm>
 #include<random>
+#include<drogon/drogon.h>
+#include"DeckController.h"
+#include<drogon/orm/Exception.h>
 
 BattleRoom::ActionResult  BattleRoom::applyOperation(int64_t userId, const Operation &operation)
 {
@@ -41,14 +44,8 @@ BattleRoom::ActionResult  BattleRoom::applyOperation(int64_t userId, const Opera
 
     switch(operation.type){
         case BattleRoom::OperationType::PlayCard:
-        if(operation.cardInstanceId < 0 || 
-            operation.cardInstanceId >= players[request_player].hand.size()){
-                //currently I didn't make a unique id for each card in hand, so I just use its index as id
-                actionerr = ActionError::InvalidCard;
-                break;
-            }
         if(!game_update_playcard_(new_events, operation)){
-            actionerr = ActionError::InvalidTarget;
+            actionerr = ActionError::InvalidCard;
             break;
         }
         if(request_player)testinfo.player_2_play_card = true;
@@ -62,9 +59,8 @@ BattleRoom::ActionResult  BattleRoom::applyOperation(int64_t userId, const Opera
         game_update_startturn_(new_events);
         break;
         case BattleRoom::OperationType::Surrender:
-        status_ = BattleRoom::RoomStatus::Finished;
-        winner = (request_player + 1) % 2;
-        new_events.push_back(create_event(RoomEventType::GameEnd, EventVisibility::Public, -1, winner));
+        set_finished_((request_player + 1) % 2);
+        new_events.push_back(create_event(RoomEventType::GameEnd, EventVisibility::Public, -1, -1, -1, -1, winner));
         break;
     }
 
@@ -101,7 +97,7 @@ BattleRoom::EventVector BattleRoom::getEventsAfter(uint64_t sequence, uint64_t v
     std::lock_guard<std::mutex> lock_guard(mutex_);
     is_viewer_valid = players[0].userId==viewerId || players[1].userId == viewerId;
     if(!is_viewer_valid)return ret;
-    get_events_impl(ret, viewerId, is_viewer_valid);
+    get_events_impl(ret, sequence, viewerId);
     return ret;
 }
 
@@ -117,7 +113,7 @@ Json::Value BattleRoom::getEventsAfterJson(uint64_t sequence, uint64_t viewerId,
         ret["message"] = "player not in room";
         return ret;
     }
-    get_events_impl(ev, viewerId, is_viewer_valid);
+    get_events_impl(ev, sequence, viewerId);
     mutex_.unlock();
     ret["state"] = "SUCCESS";
     ret["events"] = eventListToJson(ev);
@@ -132,34 +128,76 @@ bool BattleRoom::init_with_match_info(const MatchInfo &match)
     for(int i=0;i<2;++i){
     players[i].userId = match.players[i];
     players[i].deckId = match.decks[i];
-    players[i].deck.resize(30, 1);
-    //TODO: fill player.deck  with deck info in datebase
-    //return false for invalid deck
+    try{
+        bool success;
+        players[i].deck = DeckController::GetDeckById(players[i].userId, players[i].deckId, success);
+        if(!success)return false;
+    }catch(const drogon::orm::DrogonDbException& e){
+        return false;
+    }
+    if(players[i].deck.size()<4)return false;
     std::shuffle(players[i].deck.begin(), players[i].deck.end(),g);
         for(auto k = 0; k< 3; ++k){
-            players[i].hand.push_back(players[i].deck.back());
+            players[i].hand.push_back(create_instance_(players[i].deck.back(), i, CardInstance::ZoneHand));
             players[i].deck.pop_back();
         }
     }
     currentPlayer = rand()%2;
-    players[(currentPlayer + 1) % 2].hand.push_back(players[(currentPlayer + 1)%2].deck.back());
+    players[(currentPlayer + 1) % 2].hand.push_back(create_instance_(
+        players[(currentPlayer + 1)%2].deck.back(),
+        (currentPlayer + 1) % 2,
+        CardInstance::ZoneHand));
     players[(currentPlayer + 1) % 2].deck.pop_back();
     matchId_ = match.matchId;
     status_ = RoomStatus::Playing;
+    playerLeft_[0] = false;
+    playerLeft_[1] = false;
+    hasFinishedAt_ = false;
     return true;
+}
+
+bool BattleRoom::isFinishedFor(std::chrono::steady_clock::duration duration)const
+{
+    std::lock_guard<std::mutex> lock_guard(mutex_);
+    return status_ == RoomStatus::Finished && hasFinishedAt_ &&
+        std::chrono::steady_clock::now() - finishedAt_ >= duration;
+}
+
+bool BattleRoom::markPlayerLeft(int64_t playerid, bool &both_left)
+{
+    std::lock_guard<std::mutex> lock_guard(mutex_);
+    if(playerid == players[0].userId)playerLeft_[0] = true;
+    else if(playerid == players[1].userId)playerLeft_[1] = true;
+    else return false;
+    both_left = status_ == RoomStatus::Finished && playerLeft_[0] && playerLeft_[1];
+    return true;
+}
+
+BattleRoom::QuickStateGettingStruct BattleRoom::quickStateGetting(int64_t playerid)
+{
+    QuickStateGettingStruct ret{0};
+    std::lock_guard<std::mutex> guard(mutex_);
+    if(players[0].userId==playerid || players[1].userId == playerid){
+        ret.function_success = true;
+        ret.roomId = roomId_;
+        ret.matchId = matchId_;
+        ret.state = status_;
+        ret.opponentId = playerid == players[0].userId? players[1].userId :players[0].userId;
+    }
+    return ret;
 }
 
 bool BattleRoom::getSnapshotBin(int64_t viewerId, RoomSnapshot &snapshot)
 {
     std::lock_guard<std::mutex> lock_guard(mutex_);
 
-    if(players[0].userId==viewerId || players[1].userId == viewerId)
+    if(players[0].userId != viewerId && players[1].userId != viewerId)
         return false;
     get_snapshot_impl(snapshot, viewerId);
     return true;
 }
 
-Json::Value BattleRoom::getSnapshotJson(int viewerId, bool &is_vaild)
+Json::Value BattleRoom::getSnapshotJson(int64_t viewerId, bool &is_vaild)
 {
     Json::Value ret;
     RoomSnapshot snapshot;
@@ -173,9 +211,27 @@ Json::Value BattleRoom::getSnapshotJson(int viewerId, bool &is_vaild)
     }
     get_snapshot_impl(snapshot, viewerId);
     mutex_.unlock();
-    ret["status"] =  "SUCCESS";
+    ret["state"] =  "SUCCESS";
     ret["room_id"] = static_cast<Json::Int64>(snapshot.roomId);
     ret["match_id"] = static_cast<Json::Int64>(snapshot.matchId);
+    ret["version"] = static_cast<Json::UInt64>(snapshot.version);
+    ret["last_sequence"] = static_cast<Json::UInt64>(snapshot.last_sequence);
+    ret["current_player"] = static_cast<Json::Int>(snapshot.currentPlayer);
+    ret["winner_id"] = static_cast<Json::Int64>(snapshot.winnerId);
+    switch(snapshot.status){
+    case RoomStatus::Finished:
+        ret["room_state"] = "finished";
+        break;
+    case RoomStatus::Playing:
+        ret["room_state"] = "playing";
+        break;
+    case RoomStatus::Preparing:
+        ret["room_state"] = "perparing";
+        break;
+    default:
+        ret["room_state"] = "unknow";
+        break;
+    }
     for(int i = 0; i <2; ++i){
         std::string k1 = "player_" + std::to_string(i);
         ret[k1.c_str()]["user_id"] = static_cast<Json::Int64>(snapshot.players[i].userId);
@@ -185,12 +241,28 @@ Json::Value BattleRoom::getSnapshotJson(int viewerId, bool &is_vaild)
         ret[k1.c_str()]["deck_count"] = static_cast<Json::Int>(snapshot.players[i].deck_count);
         ret[k1.c_str()]["hand_count"] = static_cast<Json::Int>(snapshot.players[i].hand_count);
         ret[k1.c_str()]["board"] = Json::Value(Json::arrayValue);
-        for(auto elem : snapshot.players[i].board)
-            ret[k1.c_str()]["board"].append(static_cast<Json::Int64>(elem));
+        for(auto elem : snapshot.players[i].board){
+            Json::Value card;
+            card["instance_id"] = static_cast<Json::Int64>(elem);
+            auto it = instance_map.find(elem);
+            if(it != instance_map.end())
+                card["card_id"] = static_cast<Json::Int64>(it->second.cardId);
+            else
+                card["card_id"] = Json::Value();
+            ret[k1.c_str()]["board"].append(std::move(card));
+        }
     }
     ret["my_hand"] = Json::Value(Json::arrayValue);
-    for(auto elem : snapshot.my_hand)
-        ret["my_hand"].append(static_cast<Json::Int64>(elem));
+    for(auto elem : snapshot.my_hand){
+        Json::Value card;
+        card["instance_id"] = static_cast<Json::Int64>(elem);
+        auto it = instance_map.find(elem);
+        if(it != instance_map.end())
+            card["card_id"] = static_cast<Json::Int64>(it->second.cardId);
+        else
+            card["card_id"] = Json::Value();
+        ret["my_hand"].append(std::move(card));
+    }
     return ret;
 }
 
@@ -200,6 +272,9 @@ Json::Value BattleRoom::eventListToJson(const EventVector &events)
     for(auto elem : events){
         Json::Value something;
         something["actor_id"] = elem.actorId;
+        something["card_id"] = static_cast<Json::Int64>(elem.cardId);
+        something["card_instance"] = static_cast<Json::Int64>(elem.instanceId);
+        something["target_id"] = static_cast<Json::Int64>(elem.targetId);
         something["room_version"] = elem.roomVersion;
         something["sequence"] = elem.sequence;
         switch (elem.type)
@@ -252,7 +327,7 @@ void BattleRoom::get_events_impl(EventVector &ret, uint64_t seq, int64_t viewer)
     if(!events.empty() && seq < events.front().sequence - 1){
         ret.push_back({events.back().sequence, events.back().roomVersion, 
             RoomEventType::EventErr_snapshot_required, EventVisibility::Public, 
-            0, 0 });
+            -1, -1, -1, -1, 0 });
         return;
     }
     for(auto & elem : events)
@@ -277,9 +352,25 @@ void BattleRoom::get_events_impl(EventVector &ret, uint64_t seq, int64_t viewer)
 bool BattleRoom::game_update_playcard_(EventVector &_ev, const Operation &op)
 {
     PlayerState& player = players[currentPlayer%2];
+    auto it = std::find(player.hand.begin(), player.hand.end(), op.cardInstanceId);
+    if(it == player.hand.end())
+        return false;
+    auto instanceIt = instance_map.find(op.cardInstanceId);
+    if(instanceIt == instance_map.end())
+        return false;
+    int64_t cardId = instanceIt->second.cardId;
+
     //TODO: return false if invalid target
-    _ev.push_back(create_event(RoomEventType::PlayCard, EventVisibility::Public, player.hand[op.cardInstanceId], 1));
-    player.hand.erase(player.hand.begin() + op.cardInstanceId);
+    _ev.push_back(create_event(
+        RoomEventType::PlayCard,
+        EventVisibility::Public,
+        cardId,
+        player.userId,
+        op.cardInstanceId,
+        op.targetId,
+        1));
+    instanceIt->second.zone = CardInstance::ZoneGraveyard;
+    player.hand.erase(it);
     //TODO: process the card
     return true;
 }
@@ -291,7 +382,7 @@ void BattleRoom::get_snapshot_impl(RoomSnapshot &ret, int64_t viewer)
     ret.currentPlayer = currentPlayer;
     ret.version = version_;
     if(events.empty())ret.last_sequence = 0;
-    ret.last_sequence = events.back().sequence;
+    else ret.last_sequence = events.back().sequence;
     ret.status = status_;
     ret.winnerId = -1;
     if(status_==RoomStatus::Finished){
@@ -316,13 +407,15 @@ void BattleRoom::game_update_endturn_(EventVector &_ev)
     if(testinfo.player_1_play_card && testinfo.player_2_play_card){
         //currently I'm testing the code, 
         //after two player have played a card, the game will end with draw
-        status_ = RoomStatus::Finished;
-        _ev.push_back(create_event(RoomEventType::GameEnd, EventVisibility::Public, -1, -1));
+        set_finished_(-1);
+        _ev.push_back(create_event(RoomEventType::GameEnd, EventVisibility::Public, -1, -1, -1, -1, -1));
         return;
     }
     currentPlayer++;
-    if(currentPlayer % 2 == 0)_ev.push_back(this->create_event(RoomEventType::Player1_Turn, EventVisibility::Public, -1, 0));
-    else _ev.push_back(this->create_event(RoomEventType::Player2_Turn, EventVisibility::Public, -1, 0));
+    if(currentPlayer % 2 == 0)
+        _ev.push_back(this->create_event(RoomEventType::Player1_Turn, EventVisibility::Public, -1, -1, -1, -1, 0));
+    else
+        _ev.push_back(this->create_event(RoomEventType::Player2_Turn, EventVisibility::Public, -1, -1, -1, -1, 0));
 }
 
 void BattleRoom::game_update_startturn_(EventVector &_ev)
@@ -331,33 +424,58 @@ void BattleRoom::game_update_startturn_(EventVector &_ev)
     if(player.maxMana < player.maxMana_max)player.maxMana++;
     player.mana = player.maxMana;
     if(!player_drawcard_(_ev, currentPlayer) && player.health<=0){
-        status_ = BattleRoom::RoomStatus::Finished;
-        winner = (currentPlayer + 1) % 2;
-        _ev.emplace_back(create_event(RoomEventType::GameEnd, EventVisibility::Public, -1, winner));
+        set_finished_((currentPlayer + 1) % 2);
+        _ev.emplace_back(create_event(RoomEventType::GameEnd, EventVisibility::Public, -1, -1, -1, -1, winner));
     }
+}
+
+void BattleRoom::set_finished_(int winner_index)
+{
+    if(status_ != RoomStatus::Finished){
+        status_ = RoomStatus::Finished;
+        hasFinishedAt_ = true;
+        finishedAt_ = std::chrono::steady_clock::now();
+    }
+    winner = winner_index;
 }
 
 bool BattleRoom::player_drawcard_(EventVector& _ev, int which)
 {
     PlayerState& player = players[which % 2];
     if(!player.deck.empty()){
+        int64_t cardId = player.deck.back();
+        int64_t instanceId = create_instance_(cardId, which % 2, CardInstance::ZoneHand);
         if(which % 2 == 0)
             _ev.emplace_back(create_event(
                 RoomEventType::Player1_DrawCard, 
                 EventVisibility::PlayerOneOnly, 
-                player.deck.back(), 1));
+                cardId,
+                player.userId,
+                instanceId,
+                -1,
+                1));
         else
             _ev.emplace_back(create_event( 
                 RoomEventType::Player2_DrawCard, 
                 EventVisibility::PlayerTwoOnly,
-                player.deck.back(), 1));
+                cardId,
+                player.userId,
+                instanceId,
+                -1,
+                1));
         if(player.hand.size() < player.hand_max)
-            player.hand.push_back(player.deck.back());
-        else
+            player.hand.push_back(instanceId);
+        else{
+            instance_map[instanceId].zone = CardInstance::ZoneDiscard;
             _ev.emplace_back(create_event( 
                 RoomEventType::DestoryCard, 
                 EventVisibility::Public,
-                player.deck.back(), 1));
+                cardId,
+                player.userId,
+                instanceId,
+                -1,
+                1));
+        }
         player.deck.pop_back();
         //TODO: Process card triggered by draw card
         return true;
@@ -366,16 +484,44 @@ bool BattleRoom::player_drawcard_(EventVector& _ev, int which)
                 _ev.emplace_back(create_event( 
                     RoomEventType::Player1_Fatigue, 
                     EventVisibility::Public, 
-                    -1, player.fatigue_damage));
+                    -1, player.userId, -1, -1, player.fatigue_damage));
             else
                 _ev.emplace_back(create_event( 
                     RoomEventType::Player2_Fatigue, 
                     EventVisibility::Public,
-                    -1, player.fatigue_damage));
+                    -1, player.userId, -1, -1, player.fatigue_damage));
         player.health -= player.fatigue_damage;
         player.fatigue_damage++;
         return false;
     }
+}
+
+int64_t BattleRoom::create_instance_(int64_t cardId, int ownerIndex, int zone)
+{
+    int64_t instanceId = instance_id_counter++;
+    CardInstance instance{};
+    instance.instanceId = instanceId;
+    instance.cardId = cardId;
+    instance.ownerIndex = static_cast<int8_t>(ownerIndex);
+    instance.zone = static_cast<int8_t>(zone);
+    instance.type = 0;
+    instance.attack = 0;
+    instance.health = 0;
+    instance.maxHealth = 0;
+    instance.flags.exhausted = 0;
+    instance.flags.canAttack = 0;
+    instance.flags.reserved = 0;
+    instance_map[instanceId] = instance;
+    return instanceId;
+}
+
+bool BattleRoom::destroy_instance_(int64_t instanceId)
+{
+    auto it = instance_map.find(instanceId);
+    if(it == instance_map.end())
+        return false;
+    it->second.zone = CardInstance::ZoneDiscard;
+    return true;
 }
 
 std::shared_ptr<BattleRoom> RoomService::createRoom(const MatchInfo &match)
@@ -384,8 +530,13 @@ std::shared_ptr<BattleRoom> RoomService::createRoom(const MatchInfo &match)
     auto ret = std::make_shared<BattleRoom>();
     auto init_success = ret->init_with_match_info(match);
     std::lock_guard<std::mutex> guard(mutex_);
-    if(playerRooms.find(match.players[0])!= playerRooms.end() || 
-        playerRooms.find(match.players[1])!= playerRooms.end())return nullptr;
+    auto has_active_room = [this](int64_t playerid) {
+        auto it = playerRooms.find(playerid);
+        if(it == playerRooms.end())return false;
+        auto roomIt = rooms.find(it->second);
+        return roomIt != rooms.end() && !roomIt->second->isFinished();
+    };
+    if(has_active_room(match.players[0]) || has_active_room(match.players[1]))return nullptr;
     if(init_success){
         rooms[room_id_counter] = ret;
         playerRooms[match.players[0]] = room_id_counter;
@@ -421,7 +572,9 @@ bool RoomService::is_player_in_room(int64_t userid)
 {
     std::lock_guard<std::mutex> guard(mutex_);
     auto it = playerRooms.find(userid);
-    return it != playerRooms.end();
+    if(it == playerRooms.end())return false;
+    auto roomIt = rooms.find(it->second);
+    return roomIt != rooms.end() && !roomIt->second->isFinished();
 }
 
 bool RoomService::removeRoom(int64_t roomId)
@@ -430,12 +583,54 @@ bool RoomService::removeRoom(int64_t roomId)
     auto it = rooms.find(roomId);
     if(it!=rooms.end())
     {
-        playerRooms.erase(it->second->getPlayer1Id());
-        playerRooms.erase(it->second->getPlayer2Id());
+        auto playerIt = playerRooms.find(it->second->getPlayer1Id());
+        if(playerIt != playerRooms.end() && playerIt->second == roomId)
+            playerRooms.erase(playerIt);
+        playerIt = playerRooms.find(it->second->getPlayer2Id());
+        if(playerIt != playerRooms.end() && playerIt->second == roomId)
+            playerRooms.erase(playerIt);
         rooms.erase(it);
         return true;
     }
     return false;
+}
+
+bool RoomService::removeFinishedRoomIfExpired(int64_t roomId)
+{
+    std::lock_guard<std::mutex> guard(mutex_);
+    auto it = rooms.find(roomId);
+    if(it == rooms.end() || !it->second->isFinishedFor(std::chrono::minutes(5)))
+        return false;
+    auto playerIt = playerRooms.find(it->second->getPlayer1Id());
+    if(playerIt != playerRooms.end() && playerIt->second == roomId)
+        playerRooms.erase(playerIt);
+    playerIt = playerRooms.find(it->second->getPlayer2Id());
+    if(playerIt != playerRooms.end() && playerIt->second == roomId)
+        playerRooms.erase(playerIt);
+    rooms.erase(it);
+    return true;
+}
+
+bool RoomService::playerLeaveRoom(int64_t roomId, int64_t userId)
+{
+    std::shared_ptr<BattleRoom> room;
+    {
+        std::lock_guard<std::mutex> guard(mutex_);
+        auto it = rooms.find(roomId);
+        if(it == rooms.end())return false;
+        room = it->second;
+    }
+    bool both_left = false;
+    if(!room->markPlayerLeft(userId, both_left))return false;
+    if(both_left)removeRoom(roomId);
+    return true;
+}
+
+void RoomService::scheduleFinishedRoomCleanup(int64_t roomId)
+{
+    drogon::app().getLoop()->runAfter(300.0, [roomId](){
+        RoomService::GetServer().removeFinishedRoomIfExpired(roomId);
+    });
 }
 
 static RoomService RoomServiceServer;

@@ -5,6 +5,7 @@
 #include<inttypes.h>
 #include<mutex>
 #include<deque>
+#include<chrono>
 #include<unordered_map>
 #include<unordered_set>
 #include<jsoncpp/json/json.h>
@@ -79,7 +80,10 @@ struct PlayerState {
     uint64_t roomVersion;
     RoomEventType type;
     EventVisibility visibility;
+    int64_t cardId;
     int64_t actorId;
+    int64_t targetId;
+    int64_t instanceId;
     int value;
     //Json::Value payload;
     };
@@ -101,7 +105,6 @@ struct PlayerState {
       uint64_t version;
       EventVector generatedEvents;
   };
-    //int postOperation(int64_t playerid, const Operation&);//when a player post operation
     ActionResult applyOperation(int64_t userId, const Operation &operation);
     EventVector getEventsAfter(uint64_t sequence, uint64_t viewerId, bool& is_viewer_valid);
     Json::Value getEventsAfterJson(uint64_t sequence, uint64_t viewerId, bool& is_viewer_valid);
@@ -126,6 +129,8 @@ struct PlayerState {
         if(winner!=-1)win = players[winner%2].userId;
         return win;
     }
+    bool isFinishedFor(std::chrono::steady_clock::duration duration)const;
+    bool markPlayerLeft(int64_t playerid, bool& both_left);
     bool init_with_match_info(const MatchInfo & match);
     void setRoomId(int64_t roomid) { std::lock_guard<std::mutex> guard(mutex_); roomId_ = roomid; }
     int64_t getRoomId()const { std::lock_guard<std::mutex> guard(mutex_); return roomId_; }
@@ -133,7 +138,6 @@ struct PlayerState {
     int64_t getPlayer2Id()const { std::lock_guard<std::mutex> guard(mutex_); return players[1].userId; }
     static constexpr int max_requestid_stored = 64;
     static constexpr int max_event_stored = 256;
-    //实现snapshot接口
     struct RoomSnapshot{
         int64_t roomId, matchId;
         uint64_t version, last_sequence;
@@ -152,18 +156,33 @@ struct PlayerState {
         PublicPlayerState players[2];
         std::vector<int64_t>my_hand;
     };
+    struct QuickStateGettingStruct{
+        bool function_success;
+        RoomStatus state;
+        int64_t roomId;
+        int64_t matchId;
+        int64_t opponentId;
+    };
+    QuickStateGettingStruct quickStateGetting(int64_t playerid);
     bool getSnapshotBin(int64_t viewerId, RoomSnapshot& snapshot);
-    Json::Value getSnapshotJson(int viewerId, bool & is_vaild);
+    Json::Value getSnapshotJson(int64_t viewerId, bool & is_vaild);
     static Json::Value eventListToJson(const EventVector &ev);
 private:
     void get_events_impl(EventVector& event, uint64_t seq, int64_t viewer);
     bool game_update_playcard_(EventVector& _ev, const Operation& op);
     void get_snapshot_impl(RoomSnapshot& ret, int64_t viewer);
-        //return false for invalid target
     void game_update_endturn_(EventVector& _ev);
     void game_update_startturn_(EventVector& _ev);
-    inline RoomEvent create_event(RoomEventType type, EventVisibility visibility, int64_t actorid, int value){
-        return {nextSequence++, version_, type, visibility, actorid, value};
+    void set_finished_(int winner_index);
+    inline RoomEvent create_event(
+        RoomEventType type,
+        EventVisibility visibility,
+        int64_t cardId,
+        int64_t actorid,
+        int64_t instanceid,
+        int64_t targetid,
+        int value){
+        return {nextSequence++, version_, type, visibility, cardId, actorid, targetid, instanceid, value};
     }
     bool player_drawcard_(EventVector& _ev, int which);
 
@@ -171,6 +190,25 @@ private:
         bool player_1_play_card{0};
         bool player_2_play_card{0};
     };
+    struct CardInstance {
+    int64_t instanceId;
+    int64_t cardId;
+
+    int8_t ownerIndex;      // 0 or 1
+    enum {ZoneDeck, ZoneHand, ZoneBoard, ZoneGraveyard, ZoneDiscard};
+    int8_t zone;            // deck / hand / board / graveyard
+    int8_t type;
+
+    int attack;
+    int health;
+    int maxHealth;
+
+    struct{
+        unsigned exhausted : 1;
+        unsigned canAttack : 1;
+        unsigned reserved : 30;
+    } flags;
+  };
     TestField testinfo;
     mutable std::mutex mutex_;
 
@@ -179,9 +217,12 @@ private:
 
     RoomStatus status_{RoomStatus::Preparing};
     PlayerState players[2];
+    bool playerLeft_[2]{false, false};
 
     int currentPlayer{0};
     int winner{-1};
+    bool hasFinishedAt_{false};
+    std::chrono::steady_clock::time_point finishedAt_;
 
     uint64_t version_{0};
     uint64_t nextSequence{1};
@@ -190,6 +231,10 @@ private:
     std::queue<uint64_t> processed_op_q[2];
     std::unordered_map<uint64_t, ActionResult> processed_op[2];
 
+    int64_t instance_id_counter{0};
+    std::unordered_map<int64_t, CardInstance> instance_map;
+    int64_t create_instance_(int64_t cardId, int ownerIndex, int zone);
+    bool destroy_instance_(int64_t instanceId);
 };
 
 class RoomService {
@@ -202,6 +247,9 @@ class RoomService {
       bool is_player_in_room(int64_t userid);
 
       bool removeRoom(int64_t roomId);
+      bool removeFinishedRoomIfExpired(int64_t roomId);
+      bool playerLeaveRoom(int64_t roomId, int64_t userId);
+      void scheduleFinishedRoomCleanup(int64_t roomId);
       static RoomService& GetServer();
 
   private:

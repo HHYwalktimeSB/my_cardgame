@@ -1,12 +1,17 @@
 #include "MatchController.h"
 #include "RoomService.h"
+#include "session_check.h"
+#include<models/Decks.h>
 
 static MatchmakingService service;
 using namespace drogon;
+using namespace drogon::orm;
+using namespace drogon_model::cardgame_db;
 
 static void ErrorResponseWithJson(const std::string& err, const std::string& msg,
     HttpStatusCode code, const std::function<void(const HttpResponsePtr &)> &callback){
 Json::Value error;
+    error["state"] = "ERROR";
     error["error"] = err;
     error["message"] = msg;
     auto resp = HttpResponse::newHttpJsonResponse(error);
@@ -19,15 +24,15 @@ void MatchController::poll(
     std::function<void(const HttpResponsePtr &)> &&callback
 )
 {
-    auto userId = req->session()->getOptional<int64_t>("user_id");
-    if(!userId){
+    int64_t userId;
+    if(MySessionChecker::check_session(req, userId) != MySessionChecker::SessionOk){
         ErrorResponseWithJson("not logged in", "user need to logged in to call the api", k401Unauthorized, callback);
         return;
     }
     
     auto loop = app().getLoop();
     size_t token;
-    int64_t userid = *userId;
+    int64_t userid = userId;
     auto res = service.RegisterPoll(userid, callback);
 
     if(res.state==MatchmakingService::PollResultState::Added)
@@ -78,9 +83,9 @@ void MatchController::poll(
 
 void MatchController::join(const HttpRequestPtr &req, std::function<void(const HttpResponsePtr &)> &&callback)
 {
-    auto userid = req->session()->getOptional<int64_t>("user_id");
+    int64_t userid;
     auto deckid = req->getParameter("deckid");
-    if(!userid)
+    if(MySessionChecker::check_session(req, userid) != MySessionChecker::SessionOk)
     {
         ErrorResponseWithJson("not logged in", "user need to logged in to call the api", k401Unauthorized, callback);
         return;
@@ -105,8 +110,26 @@ void MatchController::join(const HttpRequestPtr &req, std::function<void(const H
             ErrorResponseWithJson("invalid argument", "invalid deck id", k400BadRequest, callback);
             return;
         }
+        try{
+        auto dbClient = app().getDbClient("db");
+    
+        Mapper<Decks> deckMapper(dbClient);
+        auto deck = deckMapper.findBy(Criteria(Decks::Cols::_id, CompareOperator::EQ, deckidi));
+        if(deck.empty()||deck[0].getValueOfUserId() != userid){
+            ErrorResponseWithJson("deckid", "invaild deckid", k400BadRequest, callback);
+            return;
+        }
+        if(!deck[0].getValueOfIsActive()){
+            ErrorResponseWithJson("inactive deck", "the deck is incomplete or contains invaild cards",
+                k400BadRequest, callback);
+            return;
+        }
+    }catch(const DrogonDbException &e){
+        ErrorResponseWithJson("database error",e.base().what(),k500InternalServerError, callback);
+        return;
     }
-    Match m = service.joinMatch(*userid, deckidi, state);
+    }
+    Match m = service.joinMatch(userid, deckidi, state);
     Json::Value json;
     HttpStatusCode resp_code = k200OK;
     if(state == MatchmakingService::Matched){
@@ -119,7 +142,7 @@ void MatchController::join(const HttpRequestPtr &req, std::function<void(const H
           Json::Value opponentJson;
           opponentJson["status"] = "MATCHED";
           opponentJson["match_id"] = static_cast<Json::Int64>(m.matchId);
-          opponentJson["opponent_id"] = static_cast<Json::Int64>(*userid);
+          opponentJson["opponent_id"] = static_cast<Json::Int64>(userid);
           opponentJson["room_id"] = static_cast<Json::Int64>(m.roomid);
           auto opponentResp =
               HttpResponse::newHttpJsonResponse(opponentJson);
@@ -149,6 +172,8 @@ void MatchController::join(const HttpRequestPtr &req, std::function<void(const H
     }else if(state == MatchmakingService::E_in_match){
         json["status"] = "FAIL";
         json["message"] = "already in a match";
+        auto room = RoomService::GetServer().findRoomByPlayer(userid);
+        if(room)json["room_id"] = room->getRoomId();
         resp_code = k409Conflict;
     }
     auto resp = HttpResponse::newHttpJsonResponse(json);
@@ -158,15 +183,15 @@ void MatchController::join(const HttpRequestPtr &req, std::function<void(const H
 
 void MatchController::cancel(const HttpRequestPtr &req, std::function<void(const HttpResponsePtr &)> &&callback)
 {
-    auto userid = req->session()->getOptional<int64_t>("user_id");
-    if(!userid)
+    int64_t userid;
+    if(MySessionChecker::check_session(req, userid) != MySessionChecker::SessionOk)
     {
         ErrorResponseWithJson("not logged in", "user need to logged in to call the api", k401Unauthorized, callback);
         return;
     }
     Json::Value json;
     bool cancel_success;
-    auto cb = service.cancelMatch(*userid, cancel_success);
+    auto cb = service.cancelMatch(userid, cancel_success);
     if(cancel_success)
     {
         json["status"] = "SUCCESS";
@@ -210,8 +235,13 @@ Match MatchmakingService::joinMatch(int64_t userId, int64_t deckId, int &state)
         return ret;
     }
     if(result.find(userId)!=result.end()){
-        state = E_in_match;
-        return ret;
+        auto it = result.find(userId);
+        int64_t usr2 = it->second.opponentId;
+        int64_t matchid = it->second.matchId;
+        result.erase(it);
+        it = result.find(usr2);
+        if(it != result.end() && it->second.matchId == matchid)
+            result.erase(it);
     }
 
     while(!waitingQueue.empty()){
@@ -355,4 +385,14 @@ MatchmakingService::PollRegisterResult MatchmakingService::RegisterPoll(int64_t 
       callbacks.emplace(userid, callback_struct(token, cb));
 
       return {PollResultState::Added, token, {}};
+}
+
+bool MatchmakingService::is_player_in_match(int64_t userid)
+{
+    std::lock_guard<std::mutex> guard(service.lock);
+    auto matchIt = service.result.find(userid);
+    if (matchIt != service.result.end())return true;
+    if(service.waitingPlayers.find(userid)!=service.waitingPlayers.end())
+        return true;
+    return false;
 }
