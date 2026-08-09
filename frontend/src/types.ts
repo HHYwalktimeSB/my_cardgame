@@ -1,4 +1,12 @@
-export type View = 'login' | 'profile' | 'queue' | 'room' | 'result';
+export type View =
+  | 'login'
+  | 'profile'
+  | 'cards'
+  | 'decks'
+  | 'deck-edit'
+  | 'queue'
+  | 'room'
+  | 'result';
 
 export type Profile = {
   user_id: number;
@@ -21,10 +29,18 @@ export type MatchResponse = {
 
 export type RoomEvent = {
   actor_id: number;
+  card_id?: number;
+  card_instance?: number;
+  target_id?: number;
   room_version: number;
   sequence: number;
   type: string;
   value: number;
+};
+
+export type SnapshotCardRef = {
+  instance_id: number;
+  card_id?: number;
 };
 
 export type SnapshotPlayer = {
@@ -34,11 +50,11 @@ export type SnapshotPlayer = {
   max_mana: number;
   deck_count: number;
   hand_count: number;
-  board: number[];
+  board: SnapshotCardRef[];
 };
 
 export type RoomSnapshot = {
-  status: 'SUCCESS' | 'ERROR';
+  state: 'SUCCESS' | 'ERROR';
   message?: string;
   room_id: number;
   match_id: number;
@@ -49,7 +65,7 @@ export type RoomSnapshot = {
   room_state?: 'playing' | 'finished' | 'perparing' | 'unknow';
   player_0: SnapshotPlayer;
   player_1: SnapshotPlayer;
-  my_hand: number[];
+  my_hand: SnapshotCardRef[];
 };
 
 export type OperationResult = {
@@ -81,4 +97,75 @@ export type CurrentRoom = {
   opponent_id?: number;
   room_state?: 'playing' | 'finished' | 'perparing' | 'unknow';
   message?: string;
+};
+
+export type CardCatalogItem = {
+  id: number;
+  card_key: string;
+  name: string;
+  description?: string | null;
+  mana_cost: number;
+  attack?: number | null;
+  health?: number | null;
+  card_type: string;
+  rarity?: string | null;
+  class_type?: string | null;
+  effect_json?: string | null;
+  image_url?: string | null;
+  is_collectible: boolean;
+};
+
+export type CardCatalogResponse = {
+  state: 'SUCCESS' | 'ERROR';
+  cards: CardCatalogItem[];
+  count: number;
+};
+
+export type OwnedCard = {
+  id: number;
+  quantity: number;
+};
+
+export type OwnedCardsResponse = {
+  state: 'SUCCESS' | 'ERROR';
+  cards: OwnedCard[];
+  count: number;
+};
+
+export type DeckSummary = {
+  deck_id: number;
+  name: string;
+  class_type: string;
+  is_active: boolean;
+};
+
+export type DeckListResponse = {
+  state: 'SUCCESS' | 'ERROR';
+  decks: DeckSummary[];
+};
+
+export type DeckEntry = {
+  card_id: number;
+  quantity: number;
+};
+
+export type DeckDetail = {
+  state: 'SUCCESS' | 'ERROR';
+  name: string;
+  class_type: string;
+  is_active: boolean;
+  cards: DeckEntry[];
+  count_cards: number;
+};
+
+export type SaveDeckResponse = {
+  state: 'SUCCESS' | 'FAIL' | 'ERROR';
+  incomplete?: boolean;
+  deck_id?: number;
+  message?: string;
+};
+
+export type DeckEditorState = {
+  mode: 'create' | 'edit';
+  deckId?: number;
 };

@@ -237,28 +237,50 @@ private:
     bool destroy_instance_(int64_t instanceId);
 };
 
+#include<functional>
+
 class RoomService {
   public:
-      std::shared_ptr<BattleRoom> createRoom(const MatchInfo &match);
+    std::shared_ptr<BattleRoom> createRoom(const MatchInfo &match);
 
-      std::shared_ptr<BattleRoom> findRoom(int64_t roomId);
+    std::shared_ptr<BattleRoom> findRoom(int64_t roomId);
 
-      std::shared_ptr<BattleRoom> findRoomByPlayer(int64_t userId);
-      bool is_player_in_room(int64_t userid);
+    std::shared_ptr<BattleRoom> findRoomByPlayer(int64_t userId);
+    bool is_player_in_room(int64_t userid);
 
-      bool removeRoom(int64_t roomId);
-      bool removeFinishedRoomIfExpired(int64_t roomId);
-      bool playerLeaveRoom(int64_t roomId, int64_t userId);
-      void scheduleFinishedRoomCleanup(int64_t roomId);
-      static RoomService& GetServer();
+    bool removeRoom(int64_t roomId);
+    bool removeFinishedRoomIfExpired(int64_t roomId);
+    bool playerLeaveRoom(int64_t roomId, int64_t userId);
+    void scheduleFinishedRoomCleanup(int64_t roomId);
+    static RoomService& GetServer();
+    std::pair<bool, uint64_t> registerPoll(int roomId, int64_t userId, std::function<void()>&& callback);
+    void invokePolls(int roomId);
+    void invokePollWithToken(int64_t roomid, uint64_t tok);
+
+    struct PollStruct{
+        bool is_registered[2];
+        uint64_t toks[2];
+        int64_t players[2];
+        std::function<void()> callback[2];
+        PollStruct(const int64_t* players_){
+            is_registered[0] = false;
+            is_registered[1] = false;
+            players[0] = players_[0];
+            players[1] = players_[1];
+            callback[0] = []()->void{};
+            callback[1] = []()->void{};
+        }
+    };
 
   private:
-      std::mutex mutex_;
-      int64_t room_id_counter{0};
-      std::unordered_map<int64_t, std::shared_ptr<BattleRoom>> rooms;
+    std::mutex mutex_;
+    int64_t room_id_counter{0};
+    std::unordered_map<int64_t, std::shared_ptr<BattleRoom>> rooms;
+    std::unordered_map<int64_t, PollStruct >polls;
+    uint64_t poll_tok_gen;
 
-      std::unordered_map<int64_t, int64_t>playerRooms;
-  };
+    std::unordered_map<int64_t, int64_t>playerRooms;
+};
 
 
 #endif

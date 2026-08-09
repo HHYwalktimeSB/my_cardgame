@@ -4,26 +4,57 @@
 void RoomController::poll(const HttpRequestPtr &req, std::function<void(const HttpResponsePtr &)> &&callback, const std::string &str_roomid)
 {
     int64_t userId;
+    std::remove_reference_t<decltype(callback)> cb = std::move(callback);
     if(MySessionChecker::check_session(req, userId) != MySessionChecker::SessionOk){
-        this->respond_w_error("not logged in", k401Unauthorized, callback);
+        this->respond_w_error("not logged in", k401Unauthorized, cb);
         return;
     }
     bool success;
-    int64_t roomId = this->str_roomid_to_int(str_roomid, callback);
+    int64_t roomId = this->str_roomid_to_int(str_roomid, cb);
     if(roomId < 0)return;
-    auto room = getroom_(roomId, userId, success, callback);
+    auto room = getroom_(roomId, userId, success, cb);
     if(!success)return;
     auto args = req->getJsonObject();
     if(!args){
-        respond_w_error("missing argumenrt", k400BadRequest, callback);
+        respond_w_error("missing argumenrt", k400BadRequest, cb);
         return;
     }
     uint64_t seq = (*args)["sequence"].asInt64();
-    auto resp = HttpResponse::newHttpJsonResponse(
+    {
+        bool has_room_access = false;
+        auto resp = HttpResponse::newHttpJsonResponse(
+            room->getEventsAfterJson(seq, userId, has_room_access));
+        if(!has_room_access){
+            resp->setStatusCode(k401Unauthorized);
+            cb(resp);
+            return;
+        }
+        if(!(*resp->getJsonObject())["events"].empty()){
+            resp->setStatusCode(k200OK);
+            cb(resp);
+            return;
+        }
+    }
+    
+    auto poll_register_res = RoomService::GetServer().registerPoll(roomId,userId,
+    [userId, seq, cb, room]()->void{
+        bool success;
+        auto resp = HttpResponse::newHttpJsonResponse(
         room->getEventsAfterJson(seq, userId, success));
-    if(success)resp->setStatusCode(k200OK);
-    else resp->setStatusCode(k401Unauthorized);
-    callback(resp);
+        if(success)resp->setStatusCode(k200OK);
+        else resp->setStatusCode(k401Unauthorized);
+        cb(resp);
+    });
+
+    if(poll_register_res.first){
+        drogon::app().getLoop()->runAfter(25.0, [roomId, token = poll_register_res.second](){
+            RoomService::GetServer().invokePollWithToken(roomId, token);
+        });
+    }
+    else{
+        respond_w_error("duplicate poll", k409Conflict, cb);
+    }
+
 }
 
 void RoomController::stat(const HttpRequestPtr &req, std::function<void(const HttpResponsePtr &)> &&callback, const std::string &str_roomid)
@@ -142,6 +173,7 @@ void RoomController::operation(const HttpRequestPtr &req, std::function<void(con
         res["events"] = BattleRoom::eventListToJson(result.generatedEvents);
         if(room->isFinished())
             RoomService::GetServer().scheduleFinishedRoomCleanup(roomId);
+        RoomService::GetServer().invokePolls(roomId);
     }else res["state"] = "FAIL";
     auto resp = HttpResponse::newHttpJsonResponse(res);
     callback(resp);

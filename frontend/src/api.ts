@@ -1,11 +1,16 @@
 import type {
+  CardCatalogResponse,
   CurrentRoom,
+  DeckDetail,
+  DeckListResponse,
   MatchResponse,
   OperationResult,
+  OwnedCardsResponse,
   Profile,
   RoomEvent,
   RoomSnapshot,
   RoomStat,
+  SaveDeckResponse,
 } from './types';
 
 async function readBody(response: Response) {
@@ -64,6 +69,40 @@ export async function getStatus() {
 
 export async function getProfile() {
   return request<Profile>('/profile/stat');
+}
+
+export async function getCardCatalog() {
+  return request<CardCatalogResponse>('/cards/catalog');
+}
+
+export async function getMyCards() {
+  return request<OwnedCardsResponse>('/cards/my');
+}
+
+export async function getDecks() {
+  return request<DeckListResponse>('/decks/');
+}
+
+export async function getDeck(deckId: number) {
+  return request<DeckDetail>(`/decks/${deckId}`);
+}
+
+export async function createDeck(name: string, cards: { card_id: number; quantity: number }[]) {
+  return request<SaveDeckResponse>('/decks/', {
+    method: 'POST',
+    body: JSON.stringify({ name, cards }),
+  });
+}
+
+export async function updateDeck(
+  deckId: number,
+  name: string,
+  cards: { card_id: number; quantity: number }[],
+) {
+  return request<SaveDeckResponse>(`/decks/${deckId}`, {
+    method: 'POST',
+    body: JSON.stringify({ name, cards }),
+  });
 }
 
 export async function joinMatch(deckId: number) {

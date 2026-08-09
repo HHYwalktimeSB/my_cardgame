@@ -153,6 +153,15 @@ bool BattleRoom::init_with_match_info(const MatchInfo &match)
     playerLeft_[0] = false;
     playerLeft_[1] = false;
     hasFinishedAt_ = false;
+    {
+        PlayerState& player = players[currentPlayer % 2];
+        if(player.maxMana < player.maxMana_max)player.maxMana++;
+        player.mana = player.maxMana;
+        if(currentPlayer % 2 == 0)
+            this->events.push_back(this->create_event(RoomEventType::Player1_Turn, EventVisibility::Public, -1, -1, -1, -1, 0));
+        else
+            this->events.push_back(this->create_event(RoomEventType::Player2_Turn, EventVisibility::Public, -1, -1, -1, -1, 0));
+    }
     return true;
 }
 
@@ -404,13 +413,6 @@ void BattleRoom::get_snapshot_impl(RoomSnapshot &ret, int64_t viewer)
 void BattleRoom::game_update_endturn_(EventVector &_ev)
 {
     //TODO: check if any card are triggered at end of the turn
-    if(testinfo.player_1_play_card && testinfo.player_2_play_card){
-        //currently I'm testing the code, 
-        //after two player have played a card, the game will end with draw
-        set_finished_(-1);
-        _ev.push_back(create_event(RoomEventType::GameEnd, EventVisibility::Public, -1, -1, -1, -1, -1));
-        return;
-    }
     currentPlayer++;
     if(currentPlayer % 2 == 0)
         _ev.push_back(this->create_event(RoomEventType::Player1_Turn, EventVisibility::Public, -1, -1, -1, -1, 0));
@@ -541,6 +543,7 @@ std::shared_ptr<BattleRoom> RoomService::createRoom(const MatchInfo &match)
         rooms[room_id_counter] = ret;
         playerRooms[match.players[0]] = room_id_counter;
         playerRooms[match.players[1]] = room_id_counter;
+        polls[room_id_counter] = PollStruct(match.players);
         ret->setRoomId(room_id_counter);
         room_id_counter++;
         return ret;
@@ -589,6 +592,7 @@ bool RoomService::removeRoom(int64_t roomId)
         playerIt = playerRooms.find(it->second->getPlayer2Id());
         if(playerIt != playerRooms.end() && playerIt->second == roomId)
             playerRooms.erase(playerIt);
+        polls.erase(roomId);
         rooms.erase(it);
         return true;
     }
@@ -607,6 +611,7 @@ bool RoomService::removeFinishedRoomIfExpired(int64_t roomId)
     playerIt = playerRooms.find(it->second->getPlayer2Id());
     if(playerIt != playerRooms.end() && playerIt->second == roomId)
         playerRooms.erase(playerIt);
+    polls.erase(roomId);
     rooms.erase(it);
     return true;
 }
@@ -638,4 +643,69 @@ static RoomService RoomServiceServer;
 RoomService &RoomService::GetServer()
 {
     return RoomServiceServer;
+}
+
+std::pair<bool, uint64_t> RoomService::registerPoll(int roomId, int64_t userId, std::function<void()> &&callback)
+{
+    std::lock_guard<std::mutex> guard(mutex_);
+    auto it = polls.find(roomId);
+    if(it!=polls.end()){
+        if(it->second.players[0]==userId&& !it->second.is_registered[0]){
+            it->second.is_registered[0] = true;
+            it->second.toks[0] = poll_tok_gen;
+            it->second.callback[0] = std::move(callback);
+            return std::make_pair(true, poll_tok_gen++);
+        }
+        if(it->second.players[1]==userId&& !it->second.is_registered[1]){
+            it->second.is_registered[1] = true;
+            it->second.toks[1] = poll_tok_gen;
+            it->second.callback[1] = std::move(callback);
+            return std::make_pair(true, poll_tok_gen++);
+        }
+    }
+    return std::make_pair(false, 0);
+}
+
+void RoomService::invokePolls(int roomId)
+{
+    std::function<void()> cb[2];
+    cb[0] = []()->void{};
+    cb[1] = []()->void{};
+    {
+    std::lock_guard<std::mutex> guard(mutex_);
+    auto it = polls.find(roomId);
+    if(it!=polls.end()){
+        if(it->second.is_registered[0]){
+            it->second.is_registered[0] = false;
+            cb[0] = std::move(it->second.callback[0]);
+        }
+        if(it->second.is_registered[1]){
+            it->second.is_registered[1] = false;
+            it->second.callback[1]();
+            cb[1] = std::move(it->second.callback[1]);
+        }
+    }
+    }
+    cb[0]();
+    cb[1]();
+}
+
+void RoomService::invokePollWithToken(int64_t roomId, uint64_t tok)
+{
+    std::function<void()> cb = []()->void{};
+    {
+    std::lock_guard<std::mutex> guard(mutex_);
+    auto it = polls.find(roomId);
+    if(it!=polls.end()){
+        if(it->second.is_registered[0] && it->second.toks[0]==tok){
+            it->second.is_registered[0] = false;
+            cb = std::move(it->second.callback[0]);
+        }
+        if(it->second.is_registered[1] && it->second.toks[1]==tok){
+            it->second.is_registered[1] = false;
+            cb = std::move(it->second.callback[1]);
+        }
+    }
+    }
+    cb();
 }
