@@ -175,7 +175,7 @@ void UserController::registerUser(
     //Note findBy is async
     Pmapper->findBy(
         Criteria(Users::Cols::_username, CompareOperator::EQ, username),
-        [cb, username, password, Pmapper] (std::vector<Users> users)->void
+        [cb, username, password, Pmapper, client] (std::vector<Users> users)->void
         {//callback for correct
             if(!users.empty())
             {

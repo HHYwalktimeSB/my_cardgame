@@ -18,6 +18,10 @@ export default defineConfig({
         target: 'http://127.0.0.1:5555',
         changeOrigin: true,
       },
+      '/decks': {
+        target: 'http://127.0.0.1:5555',
+        changeOrigin: true,
+      },
       '/matchfind': {
         target: 'http://127.0.0.1:5555',
         changeOrigin: true,

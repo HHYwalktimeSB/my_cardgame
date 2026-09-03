@@ -543,7 +543,9 @@ std::shared_ptr<BattleRoom> RoomService::createRoom(const MatchInfo &match)
         rooms[room_id_counter] = ret;
         playerRooms[match.players[0]] = room_id_counter;
         playerRooms[match.players[1]] = room_id_counter;
-        polls[room_id_counter] = PollStruct(match.players);
+        polls[room_id_counter] = PollStruct();
+        polls[room_id_counter].players[0] = match.players[0];
+        polls[room_id_counter].players[1] = match.players[1];
         ret->setRoomId(room_id_counter);
         room_id_counter++;
         return ret;

@@ -313,7 +313,7 @@ function LoginScreen({ onDone }: { onDone: (message: string) => void }) {
       if (mode === 'register') {
         await login(username, password);
       }
-      onDone(typeof result === 'string' ? result : 'success');
+      await onDone(typeof result === 'string' ? result : 'success');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'request failed');
     } finally {
@@ -364,7 +364,8 @@ function ProfileScreen({
   onFindMatch: () => void;
 }) {
   const stats = profile.stats ?? {};
-  const activeDecks = decks.filter(deck => deck.is_active).length;
+  const safeDecks = Array.isArray(decks) ? decks : [];
+  const activeDecks = safeDecks.filter(deck => deck.is_active).length;
 
   return (
     <main className="page-grid">
@@ -398,7 +399,7 @@ function ProfileScreen({
         <div className="summary-strip">
           <div className="summary-chip">
             <span>Decks</span>
-            <strong>{decks.length}</strong>
+            <strong>{safeDecks.length}</strong>
           </div>
           <div className="summary-chip">
             <span>Active</span>
@@ -504,6 +505,7 @@ function DecksScreen({
   const [expandedDeck, setExpandedDeck] = useState<number | null>(null);
   const [deckDetails, setDeckDetails] = useState<Record<number, DeckEntry[]>>({});
   const [busyDeck, setBusyDeck] = useState<number | null>(null);
+  const safeDecks = Array.isArray(decks) ? decks : [];
 
   async function toggleDeck(deckId: number) {
     if (expandedDeck === deckId) {
@@ -535,7 +537,7 @@ function DecksScreen({
       </section>
 
       <section className="deck-list">
-        {decks.map(deck => {
+        {safeDecks.map(deck => {
           const details = deckDetails[deck.deck_id] ?? [];
           return (
             <article className={`deck-row ${deck.is_active ? 'active' : 'inactive'}`} key={deck.deck_id}>

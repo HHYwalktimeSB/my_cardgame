@@ -262,14 +262,6 @@ class RoomService {
         uint64_t toks[2];
         int64_t players[2];
         std::function<void()> callback[2];
-        PollStruct(const int64_t* players_){
-            is_registered[0] = false;
-            is_registered[1] = false;
-            players[0] = players_[0];
-            players[1] = players_[1];
-            callback[0] = []()->void{};
-            callback[1] = []()->void{};
-        }
     };
 
   private:

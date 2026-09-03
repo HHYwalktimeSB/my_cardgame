@@ -73,7 +73,7 @@
     "user": "cardgame_user",
     "passwd": "cardgame_password",
     "is_fast": false,
-    "number_of_connections": 1
+    "number_of_connections": 4
   }
 ],
     "app": {
