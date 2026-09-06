@@ -1,6 +1,25 @@
 #include "RoomController.h"
 #include "session_check.h"
 
+namespace
+{
+
+std::string make_operation_success_json(
+    uint64_t version,
+    const std::string &eventArray)
+{
+    std::string response;
+    response.reserve(eventArray.size() + 64);
+    response += R"({"state":"SUCCESS","version":)";
+    response += std::to_string(version);
+    response += R"(,"events":)";
+    response += eventArray;
+    response += '}';
+    return response;
+}
+
+}
+
 void RoomController::poll(const HttpRequestPtr &req, std::function<void(const HttpResponsePtr &)> &&callback, const std::string &str_roomid)
 {
     int64_t userId;
@@ -66,7 +85,7 @@ void RoomController::stat(const HttpRequestPtr &req, std::function<void(const Ht
         Json::Value res;
         res["state"] = "SUCCESS";
         int64_t winner;
-        auto state = room->getStatus_and_winnder(winner);
+        auto state = room->getStatus_and_winner(winner);
         switch (state)
         {
         case BattleRoom::RoomStatus::Finished:
@@ -100,10 +119,15 @@ void RoomController::snapshot(const HttpRequestPtr &req, std::function<void(cons
     if(roomId < 0)return;
     auto room = getroom_(roomId, userId, success, callback);
     if(!success)return;
-    auto resp = HttpResponse::newHttpJsonResponse(
-        room->getSnapshotJson(userId, success));
-    if(success)resp->setStatusCode(k200OK);
-    else resp->setStatusCode(k401Unauthorized);
+    BattleRoom::RoomSnapshot snapshot{};
+    success = room->getSnapshotBin(userId, snapshot);
+    if(!success){
+        respond_w_error("Viewer not in battle room", k401Unauthorized, callback);
+        return;
+    }
+    auto resp = HttpResponse::newHttpResponse();
+    resp->setContentTypeCode(CT_APPLICATION_JSON);
+    resp->setBody(RoomService::serializeSnapshot(snapshot));
     callback(resp);
 }
 
@@ -129,6 +153,15 @@ void RoomController::operation(const HttpRequestPtr &req, std::function<void(con
     op.expectedVersion = (*args)["version"].asUInt64();
     op.requestId = (*args)["request_id"].asUInt64();
     op.targetId = (*args)["target"].asInt64();
+    std::string targetType = (*args)["target_type"].asString();
+    if(targetType.empty() || targetType == "minion")
+        op.targetType = BattleRoom::TargetType::Minion;
+    else if(targetType == "hero")
+        op.targetType = BattleRoom::TargetType::Hero;
+    else{
+        respond_w_error("invaild target type", k400BadRequest, callback);
+        return;
+    }
     std::string type = (*args)["type"].asString();
     //for(auto&c : type)c = tolower(c);
     if(type == "attack")op.type = BattleRoom::OperationType::Attack;
@@ -145,6 +178,9 @@ void RoomController::operation(const HttpRequestPtr &req, std::function<void(con
     switch(result.error){
         case BattleRoom::ActionError::InsufficientMana:
         res["action_error"] = "InsufficientMana";
+        break;
+        case BattleRoom::ActionError::BoardFull:
+        res["action_error"] = "BoardFull";
         break;
         case BattleRoom::ActionError::InvalidCard:
         res["action_error"] = "InvalidCard";
@@ -168,15 +204,25 @@ void RoomController::operation(const HttpRequestPtr &req, std::function<void(con
         success = true;
     }
     if(success){
-        res["state"] = "SUCCESS";
-        res["version"] = result.version;
-        res["events"] = BattleRoom::eventListToJson(result.generatedEvents);
+        auto serializedEvents = RoomService::serializeEventArray(
+            result.generatedEvents);
         if(room->isFinished())
             RoomService::GetServer().scheduleFinishedRoomCleanup(roomId);
         RoomService::GetServer().invokePolls(roomId);
-    }else res["state"] = "FAIL";
-    auto resp = HttpResponse::newHttpJsonResponse(res);
-    callback(resp);
+        RoomService::GetServer().publishWebSocketEvents(
+            roomId,
+            result.generatedEvents,
+            serializedEvents);
+        auto resp = HttpResponse::newHttpResponse();
+        resp->setContentTypeCode(CT_APPLICATION_JSON);
+        resp->setBody(make_operation_success_json(
+            result.version,
+            *serializedEvents));
+        callback(resp);
+        return;
+    }
+    res["state"] = "FAIL";
+    callback(HttpResponse::newHttpJsonResponse(res));
 }
 
 void RoomController::leave(const HttpRequestPtr &req, std::function<void(const HttpResponsePtr &)> &&callback, const std::string &str_roomid)

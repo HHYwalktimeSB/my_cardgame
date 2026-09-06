@@ -32,6 +32,7 @@ export type RoomEvent = {
   card_id?: number;
   card_instance?: number;
   target_id?: number;
+  target_type?: 'minion' | 'hero';
   room_version: number;
   sequence: number;
   type: string;
@@ -41,6 +42,10 @@ export type RoomEvent = {
 export type SnapshotCardRef = {
   instance_id: number;
   card_id?: number;
+  attack?: number;
+  health?: number;
+  max_health?: number;
+  exhausted?: boolean;
 };
 
 export type SnapshotPlayer = {

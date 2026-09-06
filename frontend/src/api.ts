@@ -125,22 +125,34 @@ export async function getCurrentRoom() {
   return request<CurrentRoom>('/battleroom/current');
 }
 
-export async function pollRoom(roomId: number, sequence: number) {
+export async function pollRoom(roomId: number, sequence: number, signal?: AbortSignal) {
   return request<{ state: 'SUCCESS' | 'ERROR'; events?: RoomEvent[]; message?: string }>(
     `/battleroom/${roomId}/poll`,
     {
       method: 'POST',
       body: JSON.stringify({ sequence }),
+      signal,
     },
   );
 }
 
+export function roomWebSocketUrl(roomId: number, sequence: number) {
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const query = new URLSearchParams({
+    room_id: String(roomId),
+    sequence: String(sequence),
+  });
+  return `${protocol}//${window.location.host}/battleroom/ws?${query}`;
+}
+
 export async function sendOperation(
   roomId: number,
-  type: 'play card' | 'end turn' | 'surrender',
+  type: 'play card' | 'attack' | 'end turn' | 'surrender',
   version: number,
   requestId: number,
   cardInstance = 0,
+  target = -1,
+  targetType: 'minion' | 'hero' = 'minion',
 ) {
   return request<OperationResult>(`/battleroom/${roomId}/operation`, {
     method: 'POST',
@@ -149,7 +161,8 @@ export async function sendOperation(
       version,
       request_id: requestId,
       card_instance: cardInstance,
-      target: -1,
+      target,
+      target_type: targetType,
     }),
   });
 }

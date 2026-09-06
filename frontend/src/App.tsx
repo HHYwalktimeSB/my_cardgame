@@ -18,6 +18,7 @@ import {
   pollMatch,
   pollRoom,
   register,
+  roomWebSocketUrl,
   sendOperation,
   updateDeck,
 } from './api';
@@ -849,7 +850,7 @@ function QueueScreen({
       <aside className="queue-panel">
         <div className="status-orb" />
         <h2>{status}</h2>
-        <p>当前使用匹配长轮询，房间内使用 long poll 事件流。</p>
+        <p>匹配使用长轮询，房间事件优先使用 WebSocket 并自动降级。</p>
         <button className="primary-action" disabled={queueing || selectedDeckId == null} onClick={start}>
           Find Match
         </button>
@@ -911,7 +912,6 @@ function BattleRoom({
   const [selectedCard, setSelectedCard] = useState<number>(0);
   const [busy, setBusy] = useState(false);
   const requestCounter = useRef(1);
-  const polling = useRef(false);
   const sequenceRef = useRef(0);
   const versionRef = useRef(0);
 
@@ -934,44 +934,124 @@ function BattleRoom({
 
   useEffect(() => {
     if (!snapshot) return;
-    polling.current = true;
+    let active = true;
+    let fallbackEnabled = false;
+    let fallbackLoopActive = false;
+    let fallbackRequest: AbortController | null = null;
+    let socket: WebSocket | null = null;
+    let reconnectTimer: number | undefined;
+    let connectTimer: number | undefined;
+    let processing = Promise.resolve();
 
-    async function loop() {
-      while (polling.current) {
-        try {
-          const result = await pollRoom(battle.roomId, sequenceRef.current);
-          const newEvents = result.events ?? [];
-          if (newEvents.some(event => event.type === 'error_require_snapshot')) {
-            await refreshSnapshot();
-            continue;
-          }
-          if (newEvents.length > 0) {
-            const nextSequence = Math.max(sequenceRef.current, ...newEvents.map(event => event.sequence));
-            const nextVersion = Math.max(versionRef.current, ...newEvents.map(event => event.room_version));
-            sequenceRef.current = nextSequence;
-            versionRef.current = nextVersion;
-            setEvents(current => mergeEvents(current, newEvents));
-            setSequence(nextSequence);
-            setVersion(nextVersion);
-            await refreshSnapshot();
-            if (newEvents.some(event => event.type === 'game_end')) {
-              onFinished();
-              return;
-            }
-          }
-        } catch (err) {
-          if (!polling.current) return;
-          onNotice(err instanceof Error ? err.message : 'room poll failed');
-          await new Promise(resolve => window.setTimeout(resolve, 1200));
-        }
+    async function processEvents(newEvents: RoomEvent[]) {
+      if (!active || newEvents.length === 0) return;
+      if (newEvents.some(event => event.type === 'error_require_snapshot')) {
+        await refreshSnapshot();
+        return;
+      }
+      const nextSequence = Math.max(sequenceRef.current, ...newEvents.map(event => event.sequence));
+      const nextVersion = Math.max(versionRef.current, ...newEvents.map(event => event.room_version));
+      sequenceRef.current = nextSequence;
+      versionRef.current = nextVersion;
+      setEvents(current => mergeEvents(current, newEvents));
+      setSequence(nextSequence);
+      setVersion(nextVersion);
+      await refreshSnapshot();
+      if (newEvents.some(event => event.type === 'game_end')) onFinished();
+    }
+
+    function enqueueEvents(newEvents: RoomEvent[]) {
+      processing = processing
+        .then(() => processEvents(newEvents))
+        .catch(err => onNotice(err instanceof Error ? err.message : 'event sync failed'));
+    }
+
+    function stopFallback(abortRequest = false) {
+      fallbackEnabled = false;
+      if (abortRequest) {
+        fallbackRequest?.abort();
+        fallbackRequest = null;
       }
     }
 
-    loop();
+    function startFallback() {
+      fallbackEnabled = true;
+      if (!active || fallbackLoopActive) return;
+      fallbackLoopActive = true;
+      void (async () => {
+        try {
+          while (active && fallbackEnabled) {
+            fallbackRequest = new AbortController();
+            try {
+              const result = await pollRoom(
+                battle.roomId,
+                sequenceRef.current,
+                fallbackRequest.signal,
+              );
+              enqueueEvents(result.events ?? []);
+            } catch (err) {
+              if (!active || !fallbackEnabled) return;
+              if (err instanceof DOMException && err.name === 'AbortError') continue;
+              onNotice(err instanceof Error ? err.message : 'room poll failed');
+              await new Promise(resolve => window.setTimeout(resolve, 1200));
+            }
+          }
+        } finally {
+          fallbackLoopActive = false;
+          fallbackRequest = null;
+          if (active && fallbackEnabled) startFallback();
+        }
+      })();
+    }
+
+    function connectWebSocket() {
+      if (!active) return;
+      let opened = false;
+      let currentSocket: WebSocket;
+      try {
+        currentSocket = new WebSocket(roomWebSocketUrl(battle.roomId, sequenceRef.current));
+        socket = currentSocket;
+      } catch {
+        startFallback();
+        reconnectTimer = window.setTimeout(connectWebSocket, 4000);
+        return;
+      }
+
+      connectTimer = window.setTimeout(() => {
+        if (!opened) startFallback();
+      }, 2500);
+      currentSocket.onopen = () => {
+        opened = true;
+        if (connectTimer != null) window.clearTimeout(connectTimer);
+        stopFallback();
+        currentSocket.send(JSON.stringify({ type: 'sync', sequence: sequenceRef.current }));
+      };
+      currentSocket.onmessage = event => {
+        try {
+          const result = JSON.parse(event.data) as { events?: RoomEvent[] };
+          enqueueEvents(result.events ?? []);
+        } catch {
+          currentSocket.close();
+        }
+      };
+      currentSocket.onerror = () => currentSocket.close();
+      currentSocket.onclose = () => {
+        if (connectTimer != null) window.clearTimeout(connectTimer);
+        if (!active) return;
+        startFallback();
+        reconnectTimer = window.setTimeout(connectWebSocket, 4000);
+      };
+    }
+
+    connectWebSocket();
     return () => {
-      polling.current = false;
+      active = false;
+      stopFallback(true);
+      if (connectTimer != null) window.clearTimeout(connectTimer);
+      if (reconnectTimer != null) window.clearTimeout(reconnectTimer);
+      socket?.close();
     };
-  }, [battle.roomId, onFinished, onNotice, refreshSnapshot, snapshot]);
+  }, [battle.roomId, onFinished, onNotice, refreshSnapshot, snapshot !== null]);
 
   const players = useMemo(() => {
     if (!snapshot) return null;

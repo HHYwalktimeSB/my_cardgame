@@ -29,6 +29,7 @@ export default defineConfig({
       '/battleroom': {
         target: 'http://127.0.0.1:5555',
         changeOrigin: true,
+        ws: true,
       },
     },
   },
