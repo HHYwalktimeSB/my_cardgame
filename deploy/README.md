@@ -16,6 +16,8 @@ docker compose logs -f backend
 `postgres-data` 中，`db/schema.sql` 仅在首次创建该数据卷时执行。
 Docker 构建默认同时编译两个 C++ 文件；内存较小的服务器可在 `.env` 中设置
 `BUILD_JOBS=1`。
+JsonCpp、Drogon、OpenSSL、PostgreSQL 客户端等编译和运行依赖均由镜像安装，
+无需安装到服务器宿主系统。
 
 更新代码后执行：
 

@@ -7,7 +7,11 @@ RUN apt-get update \
         build-essential \
         cmake \
         libdrogon-dev \
+        libjsoncpp-dev \
         libpq-dev \
+        libssl-dev \
+        uuid-dev \
+        zlib1g-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
