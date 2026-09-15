@@ -1,5 +1,6 @@
 FROM ubuntu:24.04 AS backend-build
 
+ARG BUILD_JOBS=2
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -14,9 +15,10 @@ COPY CMakeLists.txt main.cc ./
 COPY controllers ./controllers
 COPY models ./models
 COPY test ./test
-RUN cmake -S . -B /build -DCMAKE_BUILD_TYPE=Release \
-    && cmake --build /build --parallel "$(nproc)" --target card_game card_game_test \
-    && /build/test/card_game_test
+RUN cmake -S . -B /build -DCMAKE_BUILD_TYPE=Release
+RUN cmake --build /build --parallel "$BUILD_JOBS" \
+    --target card_game card_game_test
+RUN /build/test/card_game_test
 
 FROM node:22-alpine AS frontend-build
 WORKDIR /src/frontend

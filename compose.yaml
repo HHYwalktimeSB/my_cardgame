@@ -19,6 +19,8 @@ services:
     build:
       context: .
       target: backend
+      args:
+        BUILD_JOBS: ${BUILD_JOBS:-2}
     restart: unless-stopped
     environment:
       POSTGRES_HOST: db

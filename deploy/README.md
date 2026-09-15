@@ -14,6 +14,8 @@ docker compose logs -f backend
 
 默认通过服务器的 80 端口访问。PostgreSQL 数据保存在命名卷
 `postgres-data` 中，`db/schema.sql` 仅在首次创建该数据卷时执行。
+Docker 构建默认同时编译两个 C++ 文件；内存较小的服务器可在 `.env` 中设置
+`BUILD_JOBS=1`。
 
 更新代码后执行：
 
