@@ -17,9 +17,8 @@ docker compose logs -f backend
 Docker 构建默认同时编译两个 C++ 文件；内存较小的服务器可在 `.env` 中设置
 `BUILD_JOBS=1`。
 JsonCpp、Drogon、OpenSSL、数据库客户端等编译和运行依赖均由镜像安装，无需
-安装到服务器宿主系统。Ubuntu 的 Drogon 包启用了多个可选后端，因此镜像也会
-安装其 CMake 配置要求的 SQLite、MariaDB、hiredis、Brotli 和 yaml-cpp 开发包；
-本项目运行时仍只配置和使用 PostgreSQL。
+安装到服务器宿主系统。镜像固定从官方源码构建 Drogon 1.9.13，并只启用本项目
+需要的 PostgreSQL 后端，以匹配仓库中 ORM 模型的生成版本。
 
 更新代码后执行：
 

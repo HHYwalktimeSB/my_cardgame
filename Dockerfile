@@ -1,31 +1,47 @@
 FROM ubuntu:24.04 AS backend-build
 
 ARG BUILD_JOBS=2
+ARG DROGON_VERSION=v1.9.13
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         build-essential \
+        ca-certificates \
         cmake \
-        libc-ares-dev \
-        libbrotli-dev \
-        libdrogon-dev \
-        libhiredis-dev \
+        git \
         libjsoncpp-dev \
-        libmariadb-dev \
         libpq-dev \
-        libsqlite3-dev \
         libssl-dev \
-        libyaml-cpp-dev \
         uuid-dev \
         zlib1g-dev \
     && rm -rf /var/lib/apt/lists/*
+
+RUN git clone --branch "$DROGON_VERSION" --depth 1 \
+        --recurse-submodules --shallow-submodules \
+        https://github.com/drogonframework/drogon.git /drogon
+RUN cmake -S /drogon -B /drogon/build \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/opt/drogon \
+        -DBUILD_SHARED_LIBS=ON \
+        -DBUILD_POSTGRESQL=ON \
+        -DBUILD_MYSQL=OFF \
+        -DBUILD_SQLITE=OFF \
+        -DBUILD_REDIS=OFF \
+        -DBUILD_BROTLI=OFF \
+        -DBUILD_YAML_CONFIG=OFF \
+        -DBUILD_EXAMPLES=OFF \
+        -DBUILD_CTL=OFF \
+        -DBUILD_TESTING=OFF
+RUN cmake --build /drogon/build --parallel "$BUILD_JOBS" --target install
 
 WORKDIR /src
 COPY CMakeLists.txt main.cc ./
 COPY controllers ./controllers
 COPY models ./models
 COPY test ./test
-RUN cmake -S . -B /build -DCMAKE_BUILD_TYPE=Release
+RUN cmake -S . -B /build \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_PREFIX_PATH=/opt/drogon
 RUN cmake --build /build --parallel "$BUILD_JOBS" \
     --target card_game card_game_test
 RUN /build/test/card_game_test
@@ -40,18 +56,23 @@ RUN npm run build
 FROM ubuntu:24.04 AS backend
 
 ENV DEBIAN_FRONTEND=noninteractive
+ENV LD_LIBRARY_PATH=/opt/drogon/lib:/opt/drogon/lib64
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
-        libdrogon1t64 \
+        libjsoncpp25 \
         libpq5 \
+        libssl3t64 \
+        libuuid1 \
         python3-minimal \
+        zlib1g \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --home-dir /app --shell /usr/sbin/nologin card-game \
     && install -d -o card-game -g card-game /app/run
 
 WORKDIR /app/run
 COPY --from=backend-build /build/card_game /app/card_game
+COPY --from=backend-build /opt/drogon/ /opt/drogon/
 COPY deploy/docker/config.json /app/config.template.json
 COPY deploy/docker/backend-entrypoint.py /app/backend-entrypoint.py
 USER card-game
