@@ -29,6 +29,7 @@ TRANTOR_REPOSITORY=可访问的Trantor镜像Git地址
 ```
 
 镜像必须包含 Drogon 的 `v1.9.13` 标签，以及该标签锁定的 Trantor commit。
+构建只浅拉取该 Trantor commit，并在镜像连接偶发中断时最多重试三次。
 
 更新代码后执行：
 

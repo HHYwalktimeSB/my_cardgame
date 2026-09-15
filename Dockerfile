@@ -18,13 +18,27 @@ RUN apt-get update \
         zlib1g-dev \
     && rm -rf /var/lib/apt/lists/*
 
-RUN git clone --branch "$DROGON_VERSION" --depth 1 \
-        "$DROGON_REPOSITORY" /drogon \
-    && trantor_commit="$(git -C /drogon ls-tree HEAD trantor | awk '{print $3}')" \
-    && test -n "$trantor_commit" \
-    && git clone "$TRANTOR_REPOSITORY" /drogon/trantor \
-    && git -C /drogon/trantor checkout "$trantor_commit" \
-    && rm -rf /drogon/.git /drogon/trantor/.git
+RUN set -eu; \
+    git config --global http.version HTTP/1.1; \
+    for attempt in 1 2 3; do \
+        if git clone --branch "$DROGON_VERSION" --depth 1 \
+            "$DROGON_REPOSITORY" /drogon; then break; fi; \
+        rm -rf /drogon; \
+        if [ "$attempt" -eq 3 ]; then exit 1; fi; \
+        sleep 3; \
+    done; \
+    trantor_commit="$(git -C /drogon ls-tree HEAD trantor | awk '{print $3}')"; \
+    test -n "$trantor_commit"; \
+    git init /drogon/trantor; \
+    git -C /drogon/trantor remote add origin "$TRANTOR_REPOSITORY"; \
+    for attempt in 1 2 3; do \
+        if git -C /drogon/trantor fetch --depth 1 origin "$trantor_commit"; \
+            then break; fi; \
+        if [ "$attempt" -eq 3 ]; then exit 1; fi; \
+        sleep 3; \
+    done; \
+    git -C /drogon/trantor checkout --detach FETCH_HEAD; \
+    rm -rf /drogon/.git /drogon/trantor/.git
 RUN cmake -S /drogon -B /drogon/build \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_INSTALL_PREFIX=/opt/drogon \
