@@ -1,0 +1,23 @@
+[Unit]
+Description=Card Game Drogon Backend
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__SERVICE_USER__
+Group=__SERVICE_USER__
+WorkingDirectory=__INSTALL_ROOT__/run
+EnvironmentFile=__CONFIG_DIR__/card-game.env
+ExecStart=__INSTALL_ROOT__/bin/card_game
+Restart=on-failure
+RestartSec=2
+LimitNOFILE=65536
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=__INSTALL_ROOT__/run /var/log/card-game
+
+[Install]
+WantedBy=multi-user.target

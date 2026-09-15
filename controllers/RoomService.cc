@@ -703,7 +703,7 @@ bool RoomService::removeRoom(int64_t roomId)
         if(playerIt != playerRooms.end() && playerIt->second == roomId)
             playerRooms.erase(playerIt);
         polls.erase(roomId);
-        websocketSubscribers.erase(roomId);
+        eraseWebSocketRoomLocked(roomId);
         rooms.erase(it);
         return true;
     }
@@ -723,7 +723,7 @@ bool RoomService::removeFinishedRoomIfExpired(int64_t roomId)
     if(playerIt != playerRooms.end() && playerIt->second == roomId)
         playerRooms.erase(playerIt);
     polls.erase(roomId);
-    websocketSubscribers.erase(roomId);
+    eraseWebSocketRoomLocked(roomId);
     rooms.erase(it);
     return true;
 }
@@ -793,7 +793,6 @@ void RoomService::invokePolls(int roomId)
         }
         if(it->second.is_registered[1]){
             it->second.is_registered[1] = false;
-            it->second.callback[1]();
             cb[1] = std::move(it->second.callback[1]);
         }
     }
@@ -822,6 +821,41 @@ void RoomService::invokePollWithToken(int64_t roomId, uint64_t tok)
     cb();
 }
 
+void RoomService::eraseWebSocketLocked(
+    const drogon::WebSocketConnection *connectionKey)
+{
+    auto registrationIt = websocketRegistrations.find(connectionKey);
+    if(registrationIt == websocketRegistrations.end())return;
+
+    const int64_t roomId = registrationIt->second.roomId;
+    const auto subscriber = registrationIt->second.subscriber;
+    auto roomIt = websocketSubscribers.find(roomId);
+    if(roomIt != websocketSubscribers.end())
+    {
+        auto &subscribers = roomIt->second;
+        subscribers.erase(
+            std::remove(subscribers.begin(), subscribers.end(), subscriber),
+            subscribers.end());
+        if(subscribers.empty())websocketSubscribers.erase(roomIt);
+    }
+    websocketRegistrations.erase(registrationIt);
+}
+
+void RoomService::eraseWebSocketRoomLocked(int64_t roomId)
+{
+    auto roomIt = websocketSubscribers.find(roomId);
+    if(roomIt == websocketSubscribers.end())return;
+    for(const auto &subscriber : roomIt->second)
+    {
+        auto registrationIt = websocketRegistrations.find(
+            subscriber->connectionKey);
+        if(registrationIt != websocketRegistrations.end() &&
+           registrationIt->second.subscriber == subscriber)
+            websocketRegistrations.erase(registrationIt);
+    }
+    websocketSubscribers.erase(roomIt);
+}
+
 void RoomService::registerWebSocket(
     int64_t roomId,
     int64_t userId,
@@ -831,6 +865,7 @@ void RoomService::registerWebSocket(
     auto subscriber = std::make_shared<WebSocketSubscriber>();
     subscriber->userId = userId;
     subscriber->sequence = sequence;
+    subscriber->connectionKey = connection.get();
     subscriber->connection = connection;
     std::shared_ptr<BattleRoom> room;
     {
@@ -838,7 +873,9 @@ void RoomService::registerWebSocket(
         auto roomIt = rooms.find(roomId);
         if(roomIt == rooms.end())return;
         room = roomIt->second;
+        eraseWebSocketLocked(connection.get());
         websocketSubscribers[roomId].push_back(subscriber);
+        websocketRegistrations[connection.get()] = {roomId, subscriber};
     }
     sendWebSocketEvents(room, subscriber);
 }
@@ -847,22 +884,7 @@ void RoomService::unregisterWebSocket(
     const drogon::WebSocketConnectionPtr &connection)
 {
     std::lock_guard<std::mutex> guard(mutex_);
-    for(auto roomIt = websocketSubscribers.begin();
-        roomIt != websocketSubscribers.end();)
-    {
-        auto &subscribers = roomIt->second;
-        subscribers.erase(
-            std::remove_if(
-                subscribers.begin(),
-                subscribers.end(),
-                [&connection](const auto &subscriber) {
-                    auto current = subscriber->connection.lock();
-                    return !current || current == connection;
-                }),
-            subscribers.end());
-        if(subscribers.empty())roomIt = websocketSubscribers.erase(roomIt);
-        else ++roomIt;
-    }
+    eraseWebSocketLocked(connection.get());
 }
 
 void RoomService::syncWebSocket(
@@ -873,20 +895,12 @@ void RoomService::syncWebSocket(
     std::shared_ptr<WebSocketSubscriber> matchedSubscriber;
     {
         std::lock_guard<std::mutex> guard(mutex_);
-        for(auto &[roomId, subscribers] : websocketSubscribers)
-        {
-            for(const auto &subscriber : subscribers)
-            {
-                if(subscriber->connection.lock() == connection)
-                {
-                    auto roomIt = rooms.find(roomId);
-                    if(roomIt != rooms.end())room = roomIt->second;
-                    matchedSubscriber = subscriber;
-                    break;
-                }
-            }
-            if(matchedSubscriber)break;
-        }
+        auto registrationIt = websocketRegistrations.find(connection.get());
+        if(registrationIt == websocketRegistrations.end())return;
+        auto roomIt = rooms.find(registrationIt->second.roomId);
+        if(roomIt == rooms.end())return;
+        room = roomIt->second;
+        matchedSubscriber = registrationIt->second.subscriber;
     }
     if(!room || !matchedSubscriber)return;
     {
@@ -915,8 +929,14 @@ void RoomService::publishWebSocketEvents(
             std::remove_if(
                 storedSubscribers.begin(),
                 storedSubscribers.end(),
-                [](const auto &subscriber) {
-                    return subscriber->connection.expired();
+                [this](const auto &subscriber) {
+                    if(!subscriber->connection.expired())return false;
+                    auto registrationIt = websocketRegistrations.find(
+                        subscriber->connectionKey);
+                    if(registrationIt != websocketRegistrations.end() &&
+                       registrationIt->second.subscriber == subscriber)
+                        websocketRegistrations.erase(registrationIt);
+                    return true;
                 }),
             storedSubscribers.end());
         subscribers = storedSubscribers;

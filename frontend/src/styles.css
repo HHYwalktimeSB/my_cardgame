@@ -500,6 +500,13 @@ p {
   padding: 12px 16px;
 }
 
+.player-strip.targetable,
+.board-slot.targetable {
+  border-color: #e9b45e;
+  box-shadow: 0 0 0 2px rgba(233, 180, 94, 0.18);
+  cursor: crosshair;
+}
+
 .player-strip div:nth-child(2) {
   display: grid;
   gap: 2px;
@@ -553,7 +560,13 @@ p {
   gap: 10px;
 }
 
+.board-row.play-drop-target .board-slot {
+  border-color: #71a866;
+  background: rgba(79, 133, 70, 0.12);
+}
+
 .board-slot {
+  position: relative;
   display: grid;
   place-items: center;
   gap: 6px;
@@ -564,6 +577,19 @@ p {
   background: rgba(0, 0, 0, 0.15);
   text-align: center;
   padding: 8px;
+}
+
+.board-slot[draggable='true'] {
+  cursor: grab;
+}
+
+.board-slot.selected {
+  border-color: var(--line-strong);
+  box-shadow: 0 0 0 2px rgba(255, 191, 120, 0.22);
+}
+
+.board-slot.exhausted {
+  opacity: 0.68;
 }
 
 .board-slot span {
@@ -583,6 +609,7 @@ p {
 }
 
 .hand-card {
+  position: relative;
   display: grid;
   align-content: end;
   gap: 8px;
@@ -595,8 +622,82 @@ p {
   text-align: left;
 }
 
+.hand-card[draggable='true'] {
+  cursor: grab;
+}
+
 .hand-card small {
   color: #d5bea5;
+}
+
+.battle-card-stats {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  font-weight: 800;
+}
+
+.mana-corner {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 1;
+}
+
+.card-description {
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 10px);
+  z-index: 10;
+  width: max-content;
+  max-width: 240px;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  padding: 10px 12px;
+  color: #fff6ea !important;
+  background: rgba(24, 16, 12, 0.96);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.38);
+  font-size: 13px !important;
+  font-weight: 500;
+  line-height: 1.4;
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(-50%, 4px);
+  transition: opacity 120ms ease, transform 120ms ease;
+}
+
+.hand-card:hover .card-description,
+.board-slot:hover .card-description {
+  opacity: 1;
+  transform: translate(-50%, 0);
+  transition-delay: 550ms;
+}
+
+.hand-card:hover,
+.board-slot:hover {
+  z-index: 5;
+}
+
+.battle-card-stats span,
+.mana-corner {
+  min-width: 28px;
+  border-radius: 999px;
+  padding: 3px 7px;
+  color: #fff;
+  text-align: center;
+}
+
+.mana-stat {
+  background: #315fbd;
+}
+
+.attack-stat {
+  background: #a56a20;
+}
+
+.health-stat {
+  background: #a83b3b;
 }
 
 .battle-actions {

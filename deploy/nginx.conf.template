@@ -1,0 +1,40 @@
+server {
+    listen __HTTP_PORT__ default_server;
+    listen [::]:__HTTP_PORT__ default_server;
+    server_name __SERVER_NAME__;
+
+    root __INSTALL_ROOT__/frontend;
+    index index.html;
+
+    location = /battleroom/ws {
+        proxy_pass http://127.0.0.1:__BACKEND_PORT__;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+        proxy_buffering off;
+    }
+
+    location ~ ^/(user|profile|cards|decks|matchfind|battleroom)(/|$) {
+        proxy_pass http://127.0.0.1:__BACKEND_PORT__;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_read_timeout 75s;
+        proxy_buffering off;
+    }
+
+    location = /metrics {
+        proxy_pass http://127.0.0.1:__BACKEND_PORT__;
+        allow 127.0.0.1;
+        allow ::1;
+        deny all;
+    }
+
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}

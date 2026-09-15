@@ -1,0 +1,42 @@
+{
+  "db_clients": [
+    {
+      "name": "db",
+      "rdbms": "postgresql",
+      "host": "db",
+      "port": 5432,
+      "dbname": "cardgame_db",
+      "user": "cardgame_user",
+      "passwd": "set-by-entrypoint",
+      "is_fast": false,
+      "number_of_connections": 4
+    }
+  ],
+  "app": {
+    "number_of_threads": 2,
+    "enable_session": true,
+    "session_timeout": 3600,
+    "session_same_site": "Lax",
+    "document_root": "/app/run",
+    "home_page": "index.html",
+    "idle_connection_timeout": 3600,
+    "client_max_body_size": "1M",
+    "client_max_memory_body_size": "64K",
+    "client_max_websocket_message_size": "16K",
+    "use_gzip": true,
+    "log": {
+      "log_level": "WARN",
+      "display_local_time": true
+    }
+  },
+  "plugins": [
+    {
+      "name": "drogon::plugin::PromExporter",
+      "dependencies": [],
+      "config": {
+        "path": "/metrics"
+      }
+    }
+  ],
+  "custom_config": {}
+}

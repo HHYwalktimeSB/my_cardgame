@@ -42,6 +42,24 @@ function cardName(cardsById: Map<number, CardCatalogItem>, cardId?: number) {
   return cardsById.get(cardId)?.name ?? `Card #${cardId}`;
 }
 
+type SelectedAction = {
+  type: 'play card' | 'attack';
+  instanceId: number;
+  requiresTarget: boolean;
+};
+
+function hasSelectedBattlecry(card?: CardCatalogItem) {
+  if (!card?.effect_json) return false;
+  try {
+    const effects = JSON.parse(card.effect_json) as {
+      battlecry?: { target?: string }[];
+    };
+    return effects.battlecry?.some(effect => effect.target === 'selected') ?? false;
+  } catch {
+    return false;
+  }
+}
+
 function formatEvent(cardsById: Map<number, CardCatalogItem>, event: RoomEvent) {
   if (event.type === 'card_play') {
     return `玩家 ${event.actor_id} 打出 ${cardName(cardsById, event.card_id)}`;
@@ -909,7 +927,7 @@ function BattleRoom({
   const [events, setEvents] = useState<RoomEvent[]>([]);
   const [sequence, setSequence] = useState(0);
   const [version, setVersion] = useState(0);
-  const [selectedCard, setSelectedCard] = useState<number>(0);
+  const [selectedAction, setSelectedAction] = useState<SelectedAction | null>(null);
   const [busy, setBusy] = useState(false);
   const requestCounter = useRef(1);
   const sequenceRef = useRef(0);
@@ -1061,16 +1079,19 @@ function BattleRoom({
   }, [selfId, snapshot]);
 
   useEffect(() => {
-    if (!snapshot?.my_hand.length) {
-      setSelectedCard(0);
-      return;
+    if (!selectedAction || !snapshot || !players) return;
+    const cards = selectedAction.type === 'play card' ? snapshot.my_hand : players.you.board;
+    if (!cards.some(card => card.instance_id === selectedAction.instanceId)) {
+      setSelectedAction(null);
     }
-    if (!snapshot.my_hand.some(card => card.instance_id === selectedCard)) {
-      setSelectedCard(snapshot.my_hand[0].instance_id);
-    }
-  }, [selectedCard, snapshot]);
+  }, [players, selectedAction, snapshot]);
 
-  async function operate(type: 'play card' | 'end turn' | 'surrender') {
+  async function operate(
+    type: 'play card' | 'attack' | 'end turn' | 'surrender',
+    cardInstance = 0,
+    target = -1,
+    targetType: 'minion' | 'hero' = 'minion',
+  ) {
     if (!snapshot || busy) return;
     setBusy(true);
     try {
@@ -1079,7 +1100,9 @@ function BattleRoom({
         type,
         versionRef.current,
         requestCounter.current++,
-        type === 'play card' ? selectedCard : 0,
+        cardInstance,
+        target,
+        targetType,
       );
       if (result.state !== 'SUCCESS') {
         onNotice(result.action_error ?? result.message ?? 'operation failed');
@@ -1100,6 +1123,7 @@ function BattleRoom({
         setSequence(nextSequence);
         setVersion(nextVersion);
       }
+      setSelectedAction(null);
       await refreshSnapshot();
       if (newEvents.some(event => event.type === 'game_end')) onFinished();
     } catch (err) {
@@ -1114,6 +1138,39 @@ function BattleRoom({
   }
 
   const isMyTurn = snapshot.current_player === selfId;
+  const selectHandCard = (card: SnapshotCardRef) => {
+    if (!isMyTurn || busy) return;
+    const definition = card.card_id ? cardsById.get(card.card_id) : undefined;
+    setSelectedAction({
+      type: 'play card',
+      instanceId: card.instance_id,
+      requiresTarget: hasSelectedBattlecry(definition),
+    });
+  };
+  const selectAttacker = (instanceId: number) => {
+    setSelectedAction({ type: 'attack', instanceId, requiresTarget: true });
+  };
+  const chooseTarget = (targetId: number, targetType: 'minion' | 'hero') => {
+    if (!selectedAction || !isMyTurn || busy) return;
+    void operate(selectedAction.type, selectedAction.instanceId, targetId, targetType);
+  };
+  const playSelectedCard = () => {
+    if (selectedAction?.type !== 'play card') return;
+    if (selectedAction.requiresTarget) {
+      onNotice('请将卡牌拖到目标上，或先选择卡牌再点击目标');
+      return;
+    }
+    void operate('play card', selectedAction.instanceId);
+  };
+  const targetingWithCard = Boolean(
+    isMyTurn && !busy && selectedAction?.type === 'play card' && selectedAction.requiresTarget,
+  );
+  const targetingWithAttack = Boolean(
+    isMyTurn && !busy && selectedAction?.type === 'attack',
+  );
+  const playingWithoutTarget = Boolean(
+    isMyTurn && !busy && selectedAction?.type === 'play card' && !selectedAction.requiresTarget,
+  );
 
   return (
     <main className="battle-shell">
@@ -1123,7 +1180,12 @@ function BattleRoom({
         <span>{isMyTurn ? 'Your turn' : 'Opponent turn'}</span>
       </section>
 
-      <PlayerStrip label="Opponent" player={players.opponent} />
+      <PlayerStrip
+        label="Opponent"
+        player={players.opponent}
+        targetable={targetingWithCard || targetingWithAttack}
+        onTarget={() => chooseTarget(players.opponent.user_id, 'hero')}
+      />
 
       <section className="board">
         <div className="opponent-hand">
@@ -1131,30 +1193,67 @@ function BattleRoom({
             <div className="card-back" key={index} />
           ))}
         </div>
-        <BoardRow cards={players.opponent.board} cardsById={cardsById} />
-        <BoardRow cards={players.you.board} cardsById={cardsById} active />
+        <BoardRow
+          cards={players.opponent.board}
+          cardsById={cardsById}
+          selectedAction={selectedAction}
+          targetable={targetingWithCard || targetingWithAttack}
+          onTarget={instanceId => chooseTarget(instanceId, 'minion')}
+        />
+        <BoardRow
+          cards={players.you.board}
+          cardsById={cardsById}
+          active
+          canSelectAttacker={isMyTurn && !busy}
+          selectedAction={selectedAction}
+          targetable={targetingWithCard}
+          playDropEnabled={playingWithoutTarget}
+          onSelectAttacker={selectAttacker}
+          onTarget={instanceId => chooseTarget(instanceId, 'minion')}
+          onPlayDrop={playSelectedCard}
+        />
       </section>
 
       <section className="hand-row">
-        {snapshot.my_hand.map(card => (
-          <button
-            className={`hand-card ${selectedCard === card.instance_id ? 'selected' : ''}`}
-            key={card.instance_id}
-            onClick={() => setSelectedCard(card.instance_id)}
-          >
-            <CardArt
-              cardId={card.card_id}
-              name={cardName(cardsById, card.card_id)}
-              className="card-art hand-art"
-            />
-            <span>{cardName(cardsById, card.card_id)}</span>
-            <small>instance {card.instance_id}</small>
-            <small>card {card.card_id ?? '?'}</small>
-          </button>
-        ))}
+        {snapshot.my_hand.map(card => {
+          const definition = card.card_id ? cardsById.get(card.card_id) : undefined;
+          return (
+            <button
+              className={`hand-card ${selectedAction?.type === 'play card' && selectedAction.instanceId === card.instance_id ? 'selected' : ''}`}
+              key={card.instance_id}
+              draggable={isMyTurn && !busy}
+              onClick={() => selectHandCard(card)}
+              onDragStart={event => {
+                selectHandCard(card);
+                event.dataTransfer.effectAllowed = 'move';
+                event.dataTransfer.setData('text/plain', String(card.instance_id));
+              }}
+            >
+              <CardArt
+                cardId={card.card_id}
+                name={cardName(cardsById, card.card_id)}
+                className="card-art hand-art"
+              />
+              <span className="mana-stat mana-corner">{definition?.mana_cost ?? '-'}</span>
+              <span>{cardName(cardsById, card.card_id)}</span>
+              <div className="battle-card-stats">
+                <span className="attack-stat">{definition?.attack ?? '-'}</span>
+                <span className="health-stat">{definition?.health ?? '-'}</span>
+              </div>
+              {definition?.description && (
+                <span className="card-description">{definition.description}</span>
+              )}
+            </button>
+          );
+        })}
       </section>
 
-      <PlayerStrip label="You" player={players.you} />
+      <PlayerStrip
+        label="You"
+        player={players.you}
+        targetable={targetingWithCard}
+        onTarget={() => chooseTarget(players.you.user_id, 'hero')}
+      />
 
       <aside className="battle-actions">
         <div className="mana-block">
@@ -1173,15 +1272,15 @@ function BattleRoom({
         </div>
         <button
           className="primary-action"
-          disabled={busy || snapshot.my_hand.length === 0 || !isMyTurn}
-          onClick={() => operate('play card')}
+          disabled={busy || selectedAction?.type !== 'play card' || !isMyTurn}
+          onClick={playSelectedCard}
         >
-          Play Card
+          {targetingWithCard ? 'Choose Target' : 'Play Card'}
         </button>
-        <button disabled={busy || !isMyTurn} onClick={() => operate('end turn')}>
+        <button disabled={busy || !isMyTurn} onClick={() => void operate('end turn')}>
           End Turn
         </button>
-        <button disabled={busy} onClick={() => operate('surrender')}>
+        <button disabled={busy} onClick={() => void operate('surrender')}>
           Surrender
         </button>
         <div className="event-log">
@@ -1201,12 +1300,32 @@ function BattleRoom({
 function PlayerStrip({
   label,
   player,
+  targetable = false,
+  onTarget,
 }: {
   label: string;
   player: RoomSnapshot['player_0'];
+  targetable?: boolean;
+  onTarget?: () => void;
 }) {
   return (
-    <section className="player-strip">
+    <section
+      className={`player-strip ${targetable ? 'targetable' : ''}`}
+      role={targetable ? 'button' : undefined}
+      tabIndex={targetable ? 0 : undefined}
+      onClick={targetable ? onTarget : undefined}
+      onKeyDown={event => {
+        if (targetable && (event.key === 'Enter' || event.key === ' ')) onTarget?.();
+      }}
+      onDragOver={event => {
+        if (targetable) event.preventDefault();
+      }}
+      onDrop={event => {
+        if (!targetable) return;
+        event.preventDefault();
+        onTarget?.();
+      }}
+    >
       <div className="avatar-ring small">{label.slice(0, 1)}</div>
       <div>
         <strong>{label}</strong>
@@ -1225,17 +1344,68 @@ function BoardRow({
   cards,
   cardsById,
   active = false,
+  canSelectAttacker = false,
+  selectedAction,
+  targetable = false,
+  playDropEnabled = false,
+  onSelectAttacker,
+  onTarget,
+  onPlayDrop,
 }: {
   cards: SnapshotCardRef[];
   cardsById: Map<number, CardCatalogItem>;
   active?: boolean;
+  canSelectAttacker?: boolean;
+  selectedAction: SelectedAction | null;
+  targetable?: boolean;
+  playDropEnabled?: boolean;
+  onSelectAttacker?: (instanceId: number) => void;
+  onTarget: (instanceId: number) => void;
+  onPlayDrop?: () => void;
 }) {
   return (
-    <div className={`board-row ${active ? 'active' : ''}`}>
+    <div
+      className={`board-row ${active ? 'active' : ''} ${playDropEnabled ? 'play-drop-target' : ''}`}
+      onDragOver={event => {
+        if (playDropEnabled) event.preventDefault();
+      }}
+      onDrop={event => {
+        if (!playDropEnabled) return;
+        event.preventDefault();
+        onPlayDrop?.();
+      }}
+    >
       {Array.from({ length: 7 }, (_, index) => {
         const card = cards[index];
+        const definition = card?.card_id ? cardsById.get(card.card_id) : undefined;
+        const canAttack = Boolean(
+          card && canSelectAttacker && !card.exhausted && (card.attack ?? 0) > 0,
+        );
         return (
-          <div className="board-slot" key={index}>
+          <div
+            className={`board-slot ${card && targetable ? 'targetable' : ''} ${card && selectedAction?.type === 'attack' && selectedAction.instanceId === card.instance_id ? 'selected' : ''} ${card?.exhausted ? 'exhausted' : ''}`}
+            key={index}
+            draggable={canAttack}
+            onClick={() => {
+              if (!card) return;
+              if (targetable) onTarget(card.instance_id);
+              else if (canAttack) onSelectAttacker?.(card.instance_id);
+            }}
+            onDragStart={event => {
+              if (!card || !canAttack) return;
+              onSelectAttacker?.(card.instance_id);
+              event.dataTransfer.effectAllowed = 'move';
+              event.dataTransfer.setData('text/plain', String(card.instance_id));
+            }}
+            onDragOver={event => {
+              if (card && targetable) event.preventDefault();
+            }}
+            onDrop={event => {
+              if (!card || !targetable) return;
+              event.preventDefault();
+              onTarget(card.instance_id);
+            }}
+          >
             {card ? (
               <>
                 <CardArt
@@ -1244,7 +1414,13 @@ function BoardRow({
                   className="card-art board-art"
                 />
                 <strong>{cardName(cardsById, card.card_id)}</strong>
-                <span>#{card.instance_id}</span>
+                <div className="battle-card-stats">
+                  <span className="attack-stat">{card.attack ?? definition?.attack ?? '-'}</span>
+                  <span className="health-stat">{card.health ?? definition?.health ?? '-'}</span>
+                </div>
+                {definition?.description && (
+                  <span className="card-description">{definition.description}</span>
+                )}
               </>
             ) : (
               ''

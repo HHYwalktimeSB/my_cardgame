@@ -561,3 +561,10 @@ FodyWeavers.xsd
 # End of https://www.toptal.com/developers/gitignore/api/intellij+all,visualstudio,visualstudiocode,cmake,c,c++
 
 .tools/
+.deploy/
+.env
+
+# Local build output. Release artifacts are produced by Docker or deploy scripts.
+/build/
+/frontend/dist/
+/frontend/node_modules/

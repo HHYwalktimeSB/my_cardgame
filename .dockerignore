@@ -1,0 +1,15 @@
+.git
+.github
+.idea
+.vscode
+.deploy
+build
+cmake-build-*
+frontend/dist
+frontend/node_modules
+node_modules
+*.o
+*.a
+*.so
+*.out
+.env

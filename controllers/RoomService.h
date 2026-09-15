@@ -187,9 +187,20 @@ class RoomService {
     {
         int64_t userId;
         uint64_t sequence;
+        const drogon::WebSocketConnection *connectionKey;
         std::weak_ptr<drogon::WebSocketConnection> connection;
         std::mutex mutex;
     };
+
+    struct WebSocketRegistration
+    {
+        int64_t roomId;
+        std::shared_ptr<WebSocketSubscriber> subscriber;
+    };
+
+    void eraseWebSocketLocked(
+        const drogon::WebSocketConnection *connectionKey);
+    void eraseWebSocketRoomLocked(int64_t roomId);
 
     void sendWebSocketEvents(
         const std::shared_ptr<BattleRoom> &room,
@@ -204,6 +215,9 @@ class RoomService {
     std::unordered_map<
         int64_t,
         std::vector<std::shared_ptr<WebSocketSubscriber>>> websocketSubscribers;
+    std::unordered_map<
+        const drogon::WebSocketConnection *,
+        WebSocketRegistration> websocketRegistrations;
     uint64_t poll_tok_gen;
 
     std::unordered_map<int64_t, int64_t>playerRooms;
