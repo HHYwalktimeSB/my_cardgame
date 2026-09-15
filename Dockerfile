@@ -84,7 +84,7 @@ RUN apt-get update \
         libpq5 \
         libssl3t64 \
         libuuid1 \
-        python3-minimal \
+        python3 \
         zlib1g \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --home-dir /app --shell /usr/sbin/nologin card-game \
