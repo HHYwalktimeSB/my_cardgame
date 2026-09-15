@@ -8,6 +8,11 @@
 \set run_id local
 \endif
 
+\if :{?password_hash}
+\else
+\set password_hash 548d8323ad32cbd4c898b0cb6c48947b828de553ea51f6aa4bd0e5fea6ebf5a5
+\endif
+
 BEGIN;
 
 WITH repeated_effects AS (
@@ -66,7 +71,7 @@ ON CONFLICT (card_key) DO UPDATE SET
 INSERT INTO users (username, password_hash)
 SELECT
     format('stress_%s_%s', :'run_id', player_number),
-    '548d8323ad32cbd4c898b0cb6c48947b828de553ea51f6aa4bd0e5fea6ebf5a5'
+    :'password_hash'
 FROM generate_series(1, :matches * 2) AS player_number
 ON CONFLICT (username) DO UPDATE SET
     password_hash = EXCLUDED.password_hash;

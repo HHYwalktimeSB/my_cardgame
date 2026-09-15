@@ -568,3 +568,4 @@ FodyWeavers.xsd
 /build/
 /frontend/dist/
 /frontend/node_modules/
+/loadtest/results/

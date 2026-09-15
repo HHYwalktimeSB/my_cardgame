@@ -9,7 +9,7 @@ const matches = Number(__ENV.MATCHES || 1);
 const runId = __ENV.RUN_ID || 'local';
 const durationSeconds = Number(__ENV.DURATION || 60);
 const actionIntervalMilliseconds = Number(__ENV.ACTION_INTERVAL_MS || 750);
-const password = 'stress-pass';
+const password = __ENV.PASSWORD || 'stress-pass';
 
 const operationDuration = new Trend('battle_operation_duration', true);
 const operationFailed = new Rate('battle_operation_failed');
