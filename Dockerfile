@@ -6,10 +6,16 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         build-essential \
         cmake \
+        libc-ares-dev \
+        libbrotli-dev \
         libdrogon-dev \
+        libhiredis-dev \
         libjsoncpp-dev \
+        libmariadb-dev \
         libpq-dev \
+        libsqlite3-dev \
         libssl-dev \
+        libyaml-cpp-dev \
         uuid-dev \
         zlib1g-dev \
     && rm -rf /var/lib/apt/lists/*

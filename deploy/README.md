@@ -16,8 +16,10 @@ docker compose logs -f backend
 `postgres-data` 中，`db/schema.sql` 仅在首次创建该数据卷时执行。
 Docker 构建默认同时编译两个 C++ 文件；内存较小的服务器可在 `.env` 中设置
 `BUILD_JOBS=1`。
-JsonCpp、Drogon、OpenSSL、PostgreSQL 客户端等编译和运行依赖均由镜像安装，
-无需安装到服务器宿主系统。
+JsonCpp、Drogon、OpenSSL、数据库客户端等编译和运行依赖均由镜像安装，无需
+安装到服务器宿主系统。Ubuntu 的 Drogon 包启用了多个可选后端，因此镜像也会
+安装其 CMake 配置要求的 SQLite、MariaDB、hiredis、Brotli 和 yaml-cpp 开发包；
+本项目运行时仍只配置和使用 PostgreSQL。
 
 更新代码后执行：
 
