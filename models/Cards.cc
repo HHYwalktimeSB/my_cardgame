@@ -6,6 +6,7 @@
  */
 
 #include "Cards.h"
+#include "Utf8Utils.h"
 #include <drogon/utils/Utilities.h>
 #include <string>
 
@@ -2313,7 +2314,7 @@ bool Cards::validJsonOfField(size_t index,
                 err="Type error in the "+fieldName+" field";
                 return false;
             }
-            if(pJson.isString() && drogon::utils::utf8Length(pJson.asCString()) > 64)
+            if(pJson.isString() && card_game::utf8Length(pJson.asCString()) > 64)
             {
                 err="String length exceeds limit for the " +
                     fieldName +
@@ -2332,7 +2333,7 @@ bool Cards::validJsonOfField(size_t index,
                 err="Type error in the "+fieldName+" field";
                 return false;
             }
-            if(pJson.isString() && drogon::utils::utf8Length(pJson.asCString()) > 64)
+            if(pJson.isString() && card_game::utf8Length(pJson.asCString()) > 64)
             {
                 err="String length exceeds limit for the " +
                     fieldName +
@@ -2396,7 +2397,7 @@ bool Cards::validJsonOfField(size_t index,
                 err="Type error in the "+fieldName+" field";
                 return false;
             }
-            if(pJson.isString() && drogon::utils::utf8Length(pJson.asCString()) > 32)
+            if(pJson.isString() && card_game::utf8Length(pJson.asCString()) > 32)
             {
                 err="String length exceeds limit for the " +
                     fieldName +
@@ -2414,7 +2415,7 @@ bool Cards::validJsonOfField(size_t index,
                 err="Type error in the "+fieldName+" field";
                 return false;
             }
-            if(pJson.isString() && drogon::utils::utf8Length(pJson.asCString()) > 32)
+            if(pJson.isString() && card_game::utf8Length(pJson.asCString()) > 32)
             {
                 err="String length exceeds limit for the " +
                     fieldName +
@@ -2432,7 +2433,7 @@ bool Cards::validJsonOfField(size_t index,
                 err="Type error in the "+fieldName+" field";
                 return false;
             }
-            if(pJson.isString() && drogon::utils::utf8Length(pJson.asCString()) > 32)
+            if(pJson.isString() && card_game::utf8Length(pJson.asCString()) > 32)
             {
                 err="String length exceeds limit for the " +
                     fieldName +

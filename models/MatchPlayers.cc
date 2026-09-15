@@ -6,6 +6,7 @@
  */
 
 #include "MatchPlayers.h"
+#include "Utf8Utils.h"
 #include "Decks.h"
 #include "Matches.h"
 #include "Users.h"
@@ -1474,7 +1475,7 @@ bool MatchPlayers::validJsonOfField(size_t index,
                 err="Type error in the "+fieldName+" field";
                 return false;
             }
-            if(pJson.isString() && drogon::utils::utf8Length(pJson.asCString()) > 32)
+            if(pJson.isString() && card_game::utf8Length(pJson.asCString()) > 32)
             {
                 err="String length exceeds limit for the " +
                     fieldName +

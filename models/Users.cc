@@ -6,6 +6,7 @@
  */
 
 #include "Users.h"
+#include "Utf8Utils.h"
 #include <drogon/utils/Utilities.h>
 #include <string>
 
@@ -868,7 +869,7 @@ bool Users::validJsonOfField(size_t index,
                 err="Type error in the "+fieldName+" field";
                 return false;
             }
-            if(pJson.isString() && drogon::utils::utf8Length(pJson.asCString()) > 32)
+            if(pJson.isString() && card_game::utf8Length(pJson.asCString()) > 32)
             {
                 err="String length exceeds limit for the " +
                     fieldName +
