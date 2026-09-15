@@ -20,6 +20,16 @@ JsonCpp、Drogon、OpenSSL、数据库客户端等编译和运行依赖均由镜
 安装到服务器宿主系统。镜像固定从官方源码构建 Drogon 1.9.13，并只启用本项目
 需要的 PostgreSQL 后端，以匹配仓库中 ORM 模型的生成版本。
 
+如果服务器无法连接 GitHub，请在 `.env` 中同时配置 Drogon 和 Trantor 的镜像
+仓库地址。Drogon 的 `trantor` 子模块默认也是 GitHub 地址，只替换主仓库不够：
+
+```dotenv
+DROGON_REPOSITORY=可访问的Drogon镜像Git地址
+TRANTOR_REPOSITORY=可访问的Trantor镜像Git地址
+```
+
+镜像必须包含 Drogon 的 `v1.9.13` 标签，以及该标签锁定的 Trantor commit。
+
 更新代码后执行：
 
 ```bash

@@ -2,6 +2,8 @@ FROM ubuntu:24.04 AS backend-build
 
 ARG BUILD_JOBS=2
 ARG DROGON_VERSION=v1.9.13
+ARG DROGON_REPOSITORY=https://github.com/drogonframework/drogon.git
+ARG TRANTOR_REPOSITORY=https://github.com/an-tao/trantor.git
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -17,8 +19,12 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 RUN git clone --branch "$DROGON_VERSION" --depth 1 \
-        --recurse-submodules --shallow-submodules \
-        https://github.com/drogonframework/drogon.git /drogon
+        "$DROGON_REPOSITORY" /drogon \
+    && trantor_commit="$(git -C /drogon ls-tree HEAD trantor | awk '{print $3}')" \
+    && test -n "$trantor_commit" \
+    && git clone "$TRANTOR_REPOSITORY" /drogon/trantor \
+    && git -C /drogon/trantor checkout "$trantor_commit" \
+    && rm -rf /drogon/.git /drogon/trantor/.git
 RUN cmake -S /drogon -B /drogon/build \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_INSTALL_PREFIX=/opt/drogon \

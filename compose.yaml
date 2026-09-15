@@ -21,6 +21,8 @@ services:
       target: backend
       args:
         BUILD_JOBS: ${BUILD_JOBS:-2}
+        DROGON_REPOSITORY: ${DROGON_REPOSITORY:-https://github.com/drogonframework/drogon.git}
+        TRANTOR_REPOSITORY: ${TRANTOR_REPOSITORY:-https://github.com/an-tao/trantor.git}
     restart: unless-stopped
     environment:
       POSTGRES_HOST: db
