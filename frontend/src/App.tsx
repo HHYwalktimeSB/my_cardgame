@@ -101,16 +101,60 @@ function mergeEvents(current: RoomEvent[], incoming: RoomEvent[]) {
 type RoomEventBatch = {
   room_version?: number;
   first_sequence?: number;
-  events?: Array<Partial<RoomEvent> & Pick<RoomEvent, 'type' | 'value'>>;
+  format?: number;
+  events?: Array<
+    (Partial<RoomEvent> & Pick<RoomEvent, 'type' | 'value'>) |
+    [number, number, number, number, number, number, number]
+  >;
 };
+
+const compactEventTypes = [
+  'game_end',
+  'player_1_start_turn',
+  'player_2_start_turn',
+  'card_play',
+  'player_1_drawcard',
+  'player_2_drawcard',
+  'card_discard',
+  'card_destory',
+  'player_1_fatigue',
+  'player_2_fatigue',
+  'error_require_snapshot',
+  'minion_attack',
+  'minion_dead',
+  'effect_damage',
+  'effect_heal',
+  'effect_buff',
+] as const;
+
+function expandCompactEvent(event: number[], roomVersion: number, sequence: number): RoomEvent {
+  const [type, actorId, cardId, cardInstance, targetId, targetType, value] = event;
+  return {
+    type: compactEventTypes[type] ?? 'unknown',
+    room_version: roomVersion,
+    sequence,
+    value,
+    ...(actorId >= 0 ? { actor_id: actorId } : {}),
+    ...(cardId >= 0 ? { card_id: cardId } : {}),
+    ...(cardInstance >= 0 ? { card_instance: cardInstance } : {}),
+    ...(targetId >= 0 ? { target_id: targetId } : {}),
+    ...(targetType === 1 ? { target_type: 'hero' as const } : {}),
+  };
+}
 
 function expandEventBatch(batch?: RoomEventBatch) {
   if (!batch?.events) return [];
-  return batch.events.map((event, index) => ({
-    ...event,
-    room_version: event.room_version ?? batch.room_version ?? 0,
-    sequence: event.sequence ?? (batch.first_sequence ?? 0) + index,
-  })) as RoomEvent[];
+  return batch.events.map((event, index) => {
+    const sequence = (batch.first_sequence ?? 0) + index;
+    if (Array.isArray(event)) {
+      return expandCompactEvent(event, batch.room_version ?? 0, sequence);
+    }
+    return {
+      ...event,
+      room_version: event.room_version ?? batch.room_version ?? 0,
+      sequence: event.sequence ?? sequence,
+    } as RoomEvent;
+  });
 }
 
 function applyRoomEvents(

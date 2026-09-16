@@ -34,7 +34,29 @@ const snapshotFailed = new Rate('battle_snapshot_failed');
 const websocketErrors = new Counter('battle_websocket_errors');
 const websocketEvents = new Counter('battle_websocket_events');
 const websocketConnections = new Counter('battle_websocket_connections');
+const websocketBytesReceived = new Counter('battle_websocket_bytes_received');
+const websocketMessageSize = new Trend('battle_websocket_message_size', true);
 let slowOperationLogs = 0;
+
+const compactEventTypes = [
+  'game_end', 'player_1_start_turn', 'player_2_start_turn', 'card_play',
+  'player_1_drawcard', 'player_2_drawcard', 'card_discard', 'card_destory',
+  'player_1_fatigue', 'player_2_fatigue', 'error_require_snapshot',
+  'minion_attack', 'minion_dead', 'effect_damage', 'effect_heal', 'effect_buff',
+];
+
+function expandCompactEvent(event) {
+  const [type, actorId, cardId, cardInstance, targetId, targetType, value] = event;
+  return {
+    type: compactEventTypes[type] || 'unknown',
+    value,
+    ...(actorId >= 0 ? { actor_id: actorId } : {}),
+    ...(cardId >= 0 ? { card_id: cardId } : {}),
+    ...(cardInstance >= 0 ? { card_instance: cardInstance } : {}),
+    ...(targetId >= 0 ? { target_id: targetId } : {}),
+    ...(targetType === 1 ? { target_type: 'hero' } : {}),
+  };
+}
 
 export const options = {
   setupTimeout: __ENV.SETUP_TIMEOUT || '30m',
@@ -237,13 +259,21 @@ function connectEvents(roomId, player) {
   socket.addEventListener('open', () => websocketConnections.add(1));
   socket.addEventListener('message', event => {
     try {
+      const messageBytes = typeof event.data === 'string'
+        ? event.data.length
+        : event.data.byteLength;
+      websocketBytesReceived.add(messageBytes);
+      websocketMessageSize.add(messageBytes);
       const message = JSON.parse(event.data);
       const batch = message.batch;
-      const events = (batch?.events || message.events || []).map((item, index) => ({
-        ...item,
-        room_version: item.room_version ?? batch?.room_version,
-        sequence: item.sequence ?? ((batch?.first_sequence || 0) + index),
-      }));
+      const events = (batch?.events || message.events || []).map((rawItem, index) => {
+        const item = Array.isArray(rawItem) ? expandCompactEvent(rawItem) : rawItem;
+        return {
+          ...item,
+          room_version: item.room_version ?? batch?.room_version,
+          sequence: item.sequence ?? ((batch?.first_sequence || 0) + index),
+        };
+      });
       websocketEvents.add(events.length);
       if (message.snapshot) player.snapshot = message.snapshot;
       else if (player.snapshot) applyEvents(player.snapshot, events, player.cards, player.userId);

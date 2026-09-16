@@ -7,6 +7,8 @@
 #include<sstream>
 #include<string_view>
 #include<drogon/drogon.h>
+#include<drogon/plugins/PromExporter.h>
+#include<drogon/utils/monitoring/Counter.h>
 #include"DeckController.h"
 #include<drogon/orm/Exception.h>
 #include<models/Cards.h>
@@ -100,6 +102,36 @@ void append_event_json(
     writer.key("value");
     writer.integer(event.value);
     writer.endObject();
+}
+
+void append_compact_event_json(
+    cardgame::BattleJsonWriter &writer,
+    const BattleRoom::RoomEvent &event)
+{
+    writer.beginArray();
+    writer.integer(static_cast<int>(event.type));
+    writer.integer(event.actorId);
+    writer.integer(event.cardId);
+    writer.integer(event.instanceId);
+    writer.integer(event.targetId);
+    writer.integer(event.targetType == BattleRoom::TargetType::Hero ? 1 : 0);
+    writer.integer(event.value);
+    writer.endArray();
+}
+
+void record_websocket_message(size_t bytes)
+{
+    using Counter = drogon::monitoring::Counter;
+    using Exporter = drogon::plugin::PromExporter;
+    static const auto exporter = drogon::app().getPlugin<Exporter>();
+    static const auto messages = exporter
+        ->getCollector<Counter>("battle_websocket_messages_total")
+        ->metric({});
+    static const auto payloadBytes = exporter
+        ->getCollector<Counter>("battle_websocket_payload_bytes_total")
+        ->metric({});
+    messages->increment();
+    payloadBytes->increment(static_cast<double>(bytes));
 }
 
 std::string_view room_state_name(BattleRoom::RoomStatus status)
@@ -276,11 +308,16 @@ RoomService::SerializedEventArray RoomService::serializeEventArray(
         writer.integer(events.front().roomVersion);
         writer.key("first_sequence");
         writer.integer(events.front().sequence);
+        writer.key("format");
+        writer.integer(1);
     }
     writer.key("events");
     writer.beginArray();
     for(const auto &event : events)
-        append_event_json(writer, event, !compact);
+    {
+        if(compact)append_compact_event_json(writer, event);
+        else append_event_json(writer, event);
+    }
     writer.endArray();
     writer.endObject();
     return std::make_shared<const std::string>(writer.take());
@@ -1010,5 +1047,7 @@ void RoomService::sendWebSocketEvents(
     if(!serializedEvents || !sharedEvents ||
        !have_same_events(events, *sharedEvents))
         serializedEvents = serializeEventArray(events);
-    connection->send(serialize_websocket_events(*serializedEvents));
+    auto message = serialize_websocket_events(*serializedEvents);
+    record_websocket_message(message.size());
+    connection->send(std::move(message));
 }

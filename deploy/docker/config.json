@@ -34,7 +34,21 @@
       "name": "drogon::plugin::PromExporter",
       "dependencies": [],
       "config": {
-        "path": "/metrics"
+        "path": "/metrics",
+        "collectors": [
+          {
+            "name": "battle_websocket_messages_total",
+            "help": "Total battle WebSocket messages sent",
+            "type": "counter",
+            "labels": []
+          },
+          {
+            "name": "battle_websocket_payload_bytes_total",
+            "help": "Total battle WebSocket payload bytes sent",
+            "type": "counter",
+            "labels": []
+          }
+        ]
       }
     }
   ],

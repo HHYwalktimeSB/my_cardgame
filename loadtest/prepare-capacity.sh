@@ -28,7 +28,7 @@ password_hash=$(printf %s "$PASSWORD" | sha256sum | awk '{print $1}')
 
 printf 'Preparing %s accounts for %s total matches (RUN_ID=%s)\n' \
     "$((total_matches * 2))" "$total_matches" "$RUN_ID"
-docker compose exec -T db sh -c '
+sudo docker compose exec -T db sh -c '
     exec psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
         -v ON_ERROR_STOP=1 \
         -v "matches=$1" \

@@ -302,7 +302,21 @@
             //config: The configuration of the plugin. This json object is the parameter to initialize the plugin.
             //It can be commented out
             "config": {
-                "path": "/metrics"
+                "path": "/metrics",
+                "collectors": [
+                    {
+                        "name": "battle_websocket_messages_total",
+                        "help": "Total battle WebSocket messages sent",
+                        "type": "counter",
+                        "labels": []
+                    },
+                    {
+                        "name": "battle_websocket_payload_bytes_total",
+                        "help": "Total battle WebSocket payload bytes sent",
+                        "type": "counter",
+                        "labels": []
+                    }
+                ]
             }
         },
         {

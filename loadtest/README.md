@@ -74,6 +74,11 @@ default) are written to the matching `.log` file with their room, card, version,
 and HTTP timing details. At most `SLOW_OPERATION_LOG_LIMIT` entries (5 by default)
 are logged per VU to keep diagnostic output bounded.
 
+WebSocket traffic is reported as `battle_websocket_bytes_received` and
+`battle_websocket_message_size`. The server `/metrics` endpoint exposes matching
+`battle_websocket_payload_bytes_total` and `battle_websocket_messages_total`
+counters for measuring outbound payload independently of k6 HTTP traffic.
+
 `MATCH_STEPS` counts matches, so the player count is twice each value. A locally
 installed `k6` is used when available; otherwise the script runs
 `grafana/k6:0.54.0`. JSON summaries are written to `loadtest/results/`.
