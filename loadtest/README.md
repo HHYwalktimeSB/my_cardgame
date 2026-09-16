@@ -41,27 +41,32 @@ expected WebSocket connections, and no WebSocket errors.
 
 ## Find player capacity
 
-Run the staged capacity test on the deployed server from the repository root:
+Prepare accounts once on the game server:
 
 ```bash
-./loadtest/run-capacity.sh
+RUN_ID=cap01 \
+PASSWORD='replace-with-a-random-test-password' \
+MATCH_STEPS="10 25 50 100" \
+./loadtest/prepare-capacity.sh
 ```
 
-It defaults to `http://119.91.72.158` and tests 20, 50, 100, then 200 concurrent
-players. Each k6 VU controls a match with two logged-in players and two WebSocket
-connections. The script stops at the first failed threshold and reports the last
-stable stage. It uses the Compose PostgreSQL container to prepare test accounts;
-run it from the deployed repository where `docker compose` can access `db`.
-
-Customize the target, stages, and duration with environment variables:
+Then run the load from the local load-generator machine. Use the same values:
 
 ```bash
+RUN_ID=cap01 \
+PASSWORD='replace-with-a-random-test-password' \
 BASE_URL=http://119.91.72.158 \
-MATCH_STEPS="25 50 100 150 200" \
-DURATION=120 \
-ACTION_INTERVAL_MS=750 \
+MATCH_STEPS="10 25 50 100" \
 ./loadtest/run-capacity.sh
 ```
+
+The default stages represent 20, 50, 100, then 200 concurrent players. Run the
+load script on a separate machine with either k6 or Docker. Only the preparation
+step needs access to the server's Compose database. Each stage uses a separate
+range of accounts, so rooms left by an earlier stage cannot affect later stages.
+Each k6 VU controls a match with two logged-in players and two WebSocket
+connections. The script stops at the first failed threshold and reports the last
+stable stage. `DURATION` and `ACTION_INTERVAL_MS` customize the workload.
 
 `MATCH_STEPS` counts matches, so the player count is twice each value. A locally
 installed `k6` is used when available; otherwise the script runs

@@ -10,6 +10,7 @@ const runId = __ENV.RUN_ID || 'local';
 const durationSeconds = Number(__ENV.DURATION || 60);
 const actionIntervalMilliseconds = Number(__ENV.ACTION_INTERVAL_MS || 750);
 const password = __ENV.PASSWORD || 'stress-pass';
+const playerOffset = Number(__ENV.PLAYER_OFFSET || 0);
 
 const operationDuration = new Trend('battle_operation_duration', true);
 const operationFailed = new Rate('battle_operation_failed');
@@ -19,7 +20,7 @@ const websocketEvents = new Counter('battle_websocket_events');
 const websocketConnections = new Counter('battle_websocket_connections');
 
 export const options = {
-  setupTimeout: '5m',
+  setupTimeout: __ENV.SETUP_TIMEOUT || '30m',
   scenarios: {
     battles: {
       executor: 'per-vu-iterations',
@@ -55,6 +56,17 @@ function login(username, jar) {
   );
   check(response, { 'login succeeds': result => result.status === 200 });
   return response.status === 200;
+}
+
+function getManaCosts(jar) {
+  const response = http.get(`${baseUrl}/cards/catalog`, {
+    jar,
+    tags: { name: 'card_catalog' },
+  });
+  if (response.status !== 200) return {};
+  return Object.fromEntries(
+    response.json('cards').map(card => [Number(card.id), Number(card.mana_cost)]),
+  );
 }
 
 function findDeck(jar) {
@@ -148,8 +160,10 @@ function makePlayer(username) {
 export function setup() {
   const battles = [];
   for (let matchNumber = 1; matchNumber <= matches; matchNumber += 1) {
-    const firstPlayer = makePlayer(`stress_${runId}_${matchNumber * 2 - 1}`);
-    const secondPlayer = makePlayer(`stress_${runId}_${matchNumber * 2}`);
+    const firstPlayerNumber = playerOffset + matchNumber * 2 - 1;
+    const secondPlayerNumber = playerOffset + matchNumber * 2;
+    const firstPlayer = makePlayer(`stress_${runId}_${firstPlayerNumber}`);
+    const secondPlayer = makePlayer(`stress_${runId}_${secondPlayerNumber}`);
     if (!login(firstPlayer.username, firstPlayer.jar) ||
         !login(secondPlayer.username, secondPlayer.jar)) {
       throw new Error(`login failed while preparing match ${matchNumber}`);
@@ -206,6 +220,7 @@ export default function (data) {
     return;
   }
   const roomId = preparedBattle.roomId;
+  const manaCosts = getManaCosts(firstPlayer.jar);
 
   const firstSocket = connectEvents(roomId, firstPlayer);
   const secondSocket = connectEvents(roomId, secondPlayer);
@@ -241,11 +256,20 @@ export default function (data) {
           cardInstance: attacker.instance_id,
           target: target.instance_id,
         });
-      } else if (actorState.board.length < 7 && snapshot.my_hand.length > 0) {
+      } else if (actorState.board.length < 7) {
+        const playableCard = snapshot.my_hand.find(card =>
+          card.card_id && manaCosts[card.card_id] <= actorState.mana);
+        if (!playableCard) {
+          sendOperation(roomId, actor, {
+            type: 'end turn',
+            version: snapshot.version,
+          });
+          return;
+        }
         sendOperation(roomId, actor, {
           type: 'play card',
           version: snapshot.version,
-          cardInstance: snapshot.my_hand[0].instance_id,
+          cardInstance: playableCard.instance_id,
         });
       } else {
         sendOperation(roomId, actor, {
