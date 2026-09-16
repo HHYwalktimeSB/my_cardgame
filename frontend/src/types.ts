@@ -28,7 +28,7 @@ export type MatchResponse = {
 };
 
 export type RoomEvent = {
-  actor_id: number;
+  actor_id?: number;
   card_id?: number;
   card_instance?: number;
   target_id?: number;
@@ -76,7 +76,6 @@ export type RoomSnapshot = {
 export type OperationResult = {
   state: 'SUCCESS' | 'FAIL' | 'ERROR';
   version?: number;
-  events?: RoomEvent[];
   action_error?: string;
   message?: string;
 };

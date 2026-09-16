@@ -5,15 +5,12 @@ namespace
 {
 
 std::string make_operation_success_json(
-    uint64_t version,
-    const std::string &eventArray)
+    uint64_t version)
 {
     std::string response;
-    response.reserve(eventArray.size() + 64);
+    response.reserve(48);
     response += R"({"state":"SUCCESS","version":)";
     response += std::to_string(version);
-    response += R"(,"events":)";
-    response += eventArray;
     response += '}';
     return response;
 }
@@ -215,9 +212,7 @@ void RoomController::operation(const HttpRequestPtr &req, std::function<void(con
             serializedEvents);
         auto resp = HttpResponse::newHttpResponse();
         resp->setContentTypeCode(CT_APPLICATION_JSON);
-        resp->setBody(make_operation_success_json(
-            result.version,
-            *serializedEvents));
+        resp->setBody(make_operation_success_json(result.version));
         callback(resp);
         return;
     }

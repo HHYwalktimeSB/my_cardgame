@@ -1110,22 +1110,8 @@ function BattleRoom({
       }
       setVersion(result.version ?? versionRef.current);
       versionRef.current = result.version ?? versionRef.current;
-      const newEvents = result.events ?? [];
-      if (newEvents.length) {
-        const nextSequence = Math.max(sequenceRef.current, ...newEvents.map(event => event.sequence));
-        const nextVersion = Math.max(
-          result.version ?? versionRef.current,
-          ...newEvents.map(event => event.room_version),
-        );
-        sequenceRef.current = nextSequence;
-        versionRef.current = nextVersion;
-        setEvents(current => mergeEvents(current, newEvents));
-        setSequence(nextSequence);
-        setVersion(nextVersion);
-      }
       setSelectedAction(null);
       await refreshSnapshot();
-      if (newEvents.some(event => event.type === 'game_end')) onFinished();
     } catch (err) {
       onNotice(err instanceof Error ? err.message : 'operation failed');
     } finally {

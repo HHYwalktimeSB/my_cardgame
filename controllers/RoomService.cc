@@ -62,18 +62,31 @@ void append_event_json(
     const BattleRoom::RoomEvent &event)
 {
     writer.beginObject();
-    writer.key("actor_id");
-    writer.integer(event.actorId);
-    writer.key("card_id");
-    writer.integer(event.cardId);
-    writer.key("card_instance");
-    writer.integer(event.instanceId);
-    writer.key("target_id");
-    writer.integer(event.targetId);
-    writer.key("target_type");
-    writer.string(event.targetType == BattleRoom::TargetType::Hero
-        ? "hero"
-        : "minion");
+    if(event.actorId >= 0)
+    {
+        writer.key("actor_id");
+        writer.integer(event.actorId);
+    }
+    if(event.cardId >= 0)
+    {
+        writer.key("card_id");
+        writer.integer(event.cardId);
+    }
+    if(event.instanceId >= 0)
+    {
+        writer.key("card_instance");
+        writer.integer(event.instanceId);
+    }
+    if(event.targetId >= 0)
+    {
+        writer.key("target_id");
+        writer.integer(event.targetId);
+    }
+    if(event.targetType == BattleRoom::TargetType::Hero)
+    {
+        writer.key("target_type");
+        writer.string("hero");
+    }
     writer.key("room_version");
     writer.integer(event.roomVersion);
     writer.key("sequence");
@@ -535,13 +548,16 @@ Json::Value BattleRoom::eventListToJson(const EventVector &events)
     Json::Value ret(Json::arrayValue);
     for(const auto &elem : events){
         Json::Value something;
-        something["actor_id"] = elem.actorId;
-        something["card_id"] = static_cast<Json::Int64>(elem.cardId);
-        something["card_instance"] = static_cast<Json::Int64>(elem.instanceId);
-        something["target_id"] = static_cast<Json::Int64>(elem.targetId);
-        something["target_type"] = elem.targetType == TargetType::Hero
-            ? "hero"
-            : "minion";
+        if(elem.actorId >= 0)
+            something["actor_id"] = elem.actorId;
+        if(elem.cardId >= 0)
+            something["card_id"] = static_cast<Json::Int64>(elem.cardId);
+        if(elem.instanceId >= 0)
+            something["card_instance"] = static_cast<Json::Int64>(elem.instanceId);
+        if(elem.targetId >= 0)
+            something["target_id"] = static_cast<Json::Int64>(elem.targetId);
+        if(elem.targetType == TargetType::Hero)
+            something["target_type"] = "hero";
         something["room_version"] = elem.roomVersion;
         something["sequence"] = elem.sequence;
         something["type"] = event_type_name(elem.type).data();

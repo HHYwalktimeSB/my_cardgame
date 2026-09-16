@@ -68,6 +68,12 @@ Each k6 VU controls a match with two logged-in players and two WebSocket
 connections. The script stops at the first failed threshold and reports the last
 stable stage. `DURATION` and `ACTION_INTERVAL_MS` customize the workload.
 
+The JSON summary reports operation counts and latency separately for attacks,
+card plays, and end turns. Operations slower than `SLOW_OPERATION_MS` (1000 ms by
+default) are written to the matching `.log` file with their room, card, version,
+and HTTP timing details. At most `SLOW_OPERATION_LOG_LIMIT` entries (5 by default)
+are logged per VU to keep diagnostic output bounded.
+
 `MATCH_STEPS` counts matches, so the player count is twice each value. A locally
 installed `k6` is used when available; otherwise the script runs
 `grafana/k6:0.54.0`. JSON summaries are written to `loadtest/results/`.

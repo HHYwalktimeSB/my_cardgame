@@ -9,15 +9,32 @@ const matches = Number(__ENV.MATCHES || 1);
 const runId = __ENV.RUN_ID || 'local';
 const durationSeconds = Number(__ENV.DURATION || 60);
 const actionIntervalMilliseconds = Number(__ENV.ACTION_INTERVAL_MS || 750);
+const slowOperationMilliseconds = Number(__ENV.SLOW_OPERATION_MS || 1000);
+const slowOperationLogLimit = Number(__ENV.SLOW_OPERATION_LOG_LIMIT || 5);
 const password = __ENV.PASSWORD || 'stress-pass';
 const playerOffset = Number(__ENV.PLAYER_OFFSET || 0);
 
 const operationDuration = new Trend('battle_operation_duration', true);
+const operationMetrics = {
+  attack: {
+    count: new Counter('battle_operation_attack_count'),
+    duration: new Trend('battle_operation_attack_duration', true),
+  },
+  'play card': {
+    count: new Counter('battle_operation_play_card_count'),
+    duration: new Trend('battle_operation_play_card_duration', true),
+  },
+  'end turn': {
+    count: new Counter('battle_operation_end_turn_count'),
+    duration: new Trend('battle_operation_end_turn_duration', true),
+  },
+};
 const operationFailed = new Rate('battle_operation_failed');
 const snapshotFailed = new Rate('battle_snapshot_failed');
 const websocketErrors = new Counter('battle_websocket_errors');
 const websocketEvents = new Counter('battle_websocket_events');
 const websocketConnections = new Counter('battle_websocket_connections');
+let slowOperationLogs = 0;
 
 export const options = {
   setupTimeout: __ENV.SETUP_TIMEOUT || '30m',
@@ -99,12 +116,13 @@ function getSnapshot(roomId, jar) {
 
 function sendOperation(roomId, player, operation) {
   const startedAt = Date.now();
+  const requestId = player.requestId++;
   const response = http.post(
     `${baseUrl}/battleroom/${roomId}/operation`,
     JSON.stringify({
       type: operation.type,
       version: operation.version,
-      request_id: player.requestId++,
+      request_id: requestId,
       card_instance: operation.cardInstance || 0,
       target: operation.target == null ? -1 : operation.target,
       target_type: operation.targetType || 'minion',
@@ -112,12 +130,34 @@ function sendOperation(roomId, player, operation) {
     {
       jar: player.jar,
       headers: { 'Content-Type': 'application/json' },
-      tags: { name: 'battle_operation' },
+      tags: { name: 'battle_operation', operation: operation.type },
     },
   );
-  operationDuration.add(Date.now() - startedAt);
+  const duration = Date.now() - startedAt;
+  operationDuration.add(duration);
+  operationMetrics[operation.type].count.add(1);
+  operationMetrics[operation.type].duration.add(duration);
   const succeeded = response.status === 200 && response.json('state') === 'SUCCESS';
   operationFailed.add(!succeeded);
+  if (duration >= slowOperationMilliseconds && slowOperationLogs < slowOperationLogLimit) {
+    slowOperationLogs += 1;
+    console.warn(`slow battle operation ${JSON.stringify({
+      room_id: roomId,
+      player_id: player.userId,
+      type: operation.type,
+      card_id: operation.cardId || null,
+      card_instance: operation.cardInstance || null,
+      target_card_id: operation.targetCardId || null,
+      target: operation.target == null ? null : operation.target,
+      version: operation.version,
+      request_id: requestId,
+      duration_ms: duration,
+      waiting_ms: response.timings.waiting,
+      receiving_ms: response.timings.receiving,
+      status: response.status,
+      state: response.status === 200 ? response.json('state') : null,
+    })}`);
+  }
   return succeeded;
 }
 
@@ -254,7 +294,9 @@ export default function (data) {
           type: 'attack',
           version: snapshot.version,
           cardInstance: attacker.instance_id,
+          cardId: attacker.card_id,
           target: target.instance_id,
+          targetCardId: target.card_id,
         });
       } else if (actorState.board.length < 7) {
         const playableCard = snapshot.my_hand.find(card =>
@@ -270,6 +312,7 @@ export default function (data) {
           type: 'play card',
           version: snapshot.version,
           cardInstance: playableCard.instance_id,
+          cardId: playableCard.card_id,
         });
       } else {
         sendOperation(roomId, actor, {
