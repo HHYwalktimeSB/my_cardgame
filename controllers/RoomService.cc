@@ -59,7 +59,8 @@ std::string_view event_type_name(BattleRoom::RoomEventType type)
 
 void append_event_json(
     cardgame::BattleJsonWriter &writer,
-    const BattleRoom::RoomEvent &event)
+    const BattleRoom::RoomEvent &event,
+    bool includeBatchFields = true)
 {
     writer.beginObject();
     if(event.actorId >= 0)
@@ -87,10 +88,13 @@ void append_event_json(
         writer.key("target_type");
         writer.string("hero");
     }
-    writer.key("room_version");
-    writer.integer(event.roomVersion);
-    writer.key("sequence");
-    writer.integer(event.sequence);
+    if(includeBatchFields)
+    {
+        writer.key("room_version");
+        writer.integer(event.roomVersion);
+        writer.key("sequence");
+        writer.integer(event.sequence);
+    }
     writer.key("type");
     writer.string(event_type_name(event.type));
     writer.key("value");
@@ -159,12 +163,12 @@ void append_snapshot_player(
     writer.endObject();
 }
 
-std::string serialize_websocket_events(const std::string &eventArray)
+std::string serialize_websocket_events(const std::string &eventBatch)
 {
     std::string response;
-    response.reserve(eventArray.size() + 64);
-    response += R"({"state":"SUCCESS","transport":"websocket","events":)";
-    response += eventArray;
+    response.reserve(eventBatch.size() + 64);
+    response += R"({"state":"SUCCESS","transport":"websocket","batch":)";
+    response += eventBatch;
     response += '}';
     return response;
 }
@@ -259,12 +263,26 @@ RoomService::SerializedEventArray RoomService::serializeEventArray(
     const BattleRoom::EventVector &events)
 {
     constexpr size_t maxEventJsonSize = 320;
+    bool compact = !events.empty();
+    for(size_t index = 1; compact && index < events.size(); ++index)
+        compact = events[index].roomVersion == events.front().roomVersion &&
+                  events[index].sequence == events.front().sequence + index;
     cardgame::BattleJsonWriter writer(
-        events.size() * maxEventJsonSize + 2);
+        events.size() * maxEventJsonSize + 96);
+    writer.beginObject();
+    if(compact)
+    {
+        writer.key("room_version");
+        writer.integer(events.front().roomVersion);
+        writer.key("first_sequence");
+        writer.integer(events.front().sequence);
+    }
+    writer.key("events");
     writer.beginArray();
     for(const auto &event : events)
-        append_event_json(writer, event);
+        append_event_json(writer, event, !compact);
     writer.endArray();
+    writer.endObject();
     return std::make_shared<const std::string>(writer.take());
 }
 

@@ -98,6 +98,126 @@ function mergeEvents(current: RoomEvent[], incoming: RoomEvent[]) {
   return [...uniqueIncoming, ...current].slice(0, 24);
 }
 
+type RoomEventBatch = {
+  room_version?: number;
+  first_sequence?: number;
+  events?: Array<Partial<RoomEvent> & Pick<RoomEvent, 'type' | 'value'>>;
+};
+
+function expandEventBatch(batch?: RoomEventBatch) {
+  if (!batch?.events) return [];
+  return batch.events.map((event, index) => ({
+    ...event,
+    room_version: event.room_version ?? batch.room_version ?? 0,
+    sequence: event.sequence ?? (batch.first_sequence ?? 0) + index,
+  })) as RoomEvent[];
+}
+
+function applyRoomEvents(
+  current: RoomSnapshot,
+  incoming: RoomEvent[],
+  selfId: number,
+  cardsById: Map<number, CardCatalogItem>,
+) {
+  const next: RoomSnapshot = {
+    ...current,
+    player_0: { ...current.player_0, board: current.player_0.board.map(card => ({ ...card })) },
+    player_1: { ...current.player_1, board: current.player_1.board.map(card => ({ ...card })) },
+    my_hand: current.my_hand.map(card => ({ ...card })),
+  };
+  const players = [next.player_0, next.player_1];
+  const playerById = (id?: number) => players.find(player => player.user_id === id);
+  const boardCard = (instanceId?: number) => {
+    for (const player of players) {
+      const card = player.board.find(item => item.instance_id === instanceId);
+      if (card) return card;
+    }
+    return undefined;
+  };
+
+  for (const event of incoming) {
+    next.version = Math.max(next.version ?? 0, event.room_version);
+    next.last_sequence = Math.max(next.last_sequence ?? 0, event.sequence);
+    const actor = playerById(event.actor_id);
+
+    if (event.type === 'card_play' && actor && event.card_instance != null) {
+      const definition = event.card_id == null ? undefined : cardsById.get(event.card_id);
+      actor.mana = Math.max(0, actor.mana - (definition?.mana_cost ?? 0));
+      actor.hand_count = Math.max(0, actor.hand_count - 1);
+      if (actor.user_id === selfId) {
+        next.my_hand = next.my_hand.filter(card => card.instance_id !== event.card_instance);
+      }
+      if (definition?.card_type === 'minion') {
+        actor.board.push({
+          instance_id: event.card_instance,
+          card_id: event.card_id,
+          attack: definition.attack ?? 0,
+          health: definition.health ?? 0,
+          max_health: definition.health ?? 0,
+          exhausted: true,
+        });
+      }
+    } else if (event.type === 'minion_attack') {
+      const attacker = boardCard(event.card_instance);
+      if (attacker) attacker.exhausted = true;
+      if (event.target_type === 'hero') {
+        const target = playerById(event.target_id);
+        if (target) target.health -= event.value;
+      } else {
+        const target = boardCard(event.target_id);
+        if (attacker && target) {
+          attacker.health = (attacker.health ?? 0) - (target.attack ?? 0);
+          target.health = (target.health ?? 0) - event.value;
+        }
+      }
+    } else if (event.type === 'minion_dead' && event.card_instance != null) {
+      for (const player of players) {
+        player.board = player.board.filter(card => card.instance_id !== event.card_instance);
+      }
+    } else if (event.type === 'effect_damage' || event.type === 'effect_heal') {
+      const direction = event.type === 'effect_damage' ? -1 : 1;
+      if (event.target_type === 'hero') {
+        const target = playerById(event.target_id);
+        if (target) target.health += direction * event.value;
+      } else {
+        const target = boardCard(event.target_id);
+        if (target) target.health = (target.health ?? 0) + direction * event.value;
+      }
+    } else if (event.type === 'effect_buff') {
+      const target = boardCard(event.target_id);
+      if (target) {
+        target.attack = (target.attack ?? 0) + event.value;
+        target.health = (target.health ?? 0) + event.value;
+        target.max_health = (target.max_health ?? 0) + event.value;
+      }
+    } else if (event.type.endsWith('_start_turn')) {
+      const player = event.type === 'player_1_start_turn' ? next.player_0 : next.player_1;
+      next.current_player = player.user_id;
+      player.max_mana = Math.min(10, player.max_mana + 1);
+      player.mana = player.max_mana;
+      player.board.forEach(card => { card.exhausted = false; });
+      if (player.deck_count > 0) {
+        player.deck_count -= 1;
+        player.hand_count += 1;
+      }
+    } else if (event.type.endsWith('_drawcard') && actor?.user_id === selfId &&
+               event.card_instance != null) {
+      next.my_hand.push({ instance_id: event.card_instance, card_id: event.card_id });
+    } else if (event.type.endsWith('_fatigue') && actor) {
+      actor.health -= event.value;
+    } else if ((event.type === 'card_destory' || event.type === 'card_discard') && actor) {
+      actor.hand_count = Math.max(0, actor.hand_count - 1);
+      if (event.card_instance != null && actor.user_id === selfId) {
+        next.my_hand = next.my_hand.filter(card => card.instance_id !== event.card_instance);
+      }
+    } else if (event.type === 'game_end') {
+      next.room_state = 'finished';
+      next.winner_id = event.value < 0 ? -1 : players[event.value]?.user_id;
+    }
+  }
+  return next;
+}
+
 function cardCount(entries: DeckEntry[]) {
   return entries.reduce((sum, entry) => sum + entry.quantity, 0);
 }
@@ -961,26 +1081,48 @@ function BattleRoom({
     let connectTimer: number | undefined;
     let processing = Promise.resolve();
 
-    async function processEvents(newEvents: RoomEvent[]) {
-      if (!active || newEvents.length === 0) return;
+    async function processEvents(
+      newEvents: RoomEvent[],
+      pushedSnapshot?: RoomSnapshot,
+      applyIncrementally = false,
+    ) {
+      if (!active) return;
       if (newEvents.some(event => event.type === 'error_require_snapshot')) {
         await refreshSnapshot();
         return;
       }
-      const nextSequence = Math.max(sequenceRef.current, ...newEvents.map(event => event.sequence));
-      const nextVersion = Math.max(versionRef.current, ...newEvents.map(event => event.room_version));
+      const nextSequence = Math.max(
+        sequenceRef.current,
+        pushedSnapshot?.last_sequence ?? 0,
+        ...newEvents.map(event => event.sequence),
+      );
+      const nextVersion = Math.max(
+        versionRef.current,
+        pushedSnapshot?.version ?? 0,
+        ...newEvents.map(event => event.room_version),
+      );
       sequenceRef.current = nextSequence;
       versionRef.current = nextVersion;
-      setEvents(current => mergeEvents(current, newEvents));
+      if (newEvents.length > 0) setEvents(current => mergeEvents(current, newEvents));
       setSequence(nextSequence);
       setVersion(nextVersion);
-      await refreshSnapshot();
+      if (pushedSnapshot) setSnapshot(pushedSnapshot);
+      else if (applyIncrementally && newEvents.length > 0) {
+        setSnapshot(current => current
+          ? applyRoomEvents(current, newEvents, selfId, cardsById)
+          : current);
+      }
+      else if (newEvents.length > 0) await refreshSnapshot();
       if (newEvents.some(event => event.type === 'game_end')) onFinished();
     }
 
-    function enqueueEvents(newEvents: RoomEvent[]) {
+    function enqueueEvents(
+      newEvents: RoomEvent[],
+      pushedSnapshot?: RoomSnapshot,
+      applyIncrementally = false,
+    ) {
       processing = processing
-        .then(() => processEvents(newEvents))
+        .then(() => processEvents(newEvents, pushedSnapshot, applyIncrementally))
         .catch(err => onNotice(err instanceof Error ? err.message : 'event sync failed'));
     }
 
@@ -1046,8 +1188,16 @@ function BattleRoom({
       };
       currentSocket.onmessage = event => {
         try {
-          const result = JSON.parse(event.data) as { events?: RoomEvent[] };
-          enqueueEvents(result.events ?? []);
+          const result = JSON.parse(event.data) as {
+            events?: RoomEvent[];
+            batch?: RoomEventBatch;
+            snapshot?: RoomSnapshot;
+          };
+          enqueueEvents(
+            result.batch ? expandEventBatch(result.batch) : result.events ?? [],
+            result.snapshot,
+            true,
+          );
         } catch {
           currentSocket.close();
         }
@@ -1069,7 +1219,7 @@ function BattleRoom({
       if (reconnectTimer != null) window.clearTimeout(reconnectTimer);
       socket?.close();
     };
-  }, [battle.roomId, onFinished, onNotice, refreshSnapshot, snapshot !== null]);
+  }, [battle.roomId, cardsById, onFinished, onNotice, refreshSnapshot, selfId, snapshot !== null]);
 
   const players = useMemo(() => {
     if (!snapshot) return null;
@@ -1111,7 +1261,6 @@ function BattleRoom({
       setVersion(result.version ?? versionRef.current);
       versionRef.current = result.version ?? versionRef.current;
       setSelectedAction(null);
-      await refreshSnapshot();
     } catch (err) {
       onNotice(err instanceof Error ? err.message : 'operation failed');
     } finally {
