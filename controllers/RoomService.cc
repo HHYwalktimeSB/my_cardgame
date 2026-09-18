@@ -722,9 +722,6 @@ std::shared_ptr<BattleRoom> RoomService::createRoom(const MatchInfo &match)
         rooms[room_id_counter] = ret;
         playerRooms[match.players[0]] = room_id_counter;
         playerRooms[match.players[1]] = room_id_counter;
-        polls[room_id_counter] = PollStruct();
-        polls[room_id_counter].players[0] = match.players[0];
-        polls[room_id_counter].players[1] = match.players[1];
         ret->setRoomId(room_id_counter);
         room_id_counter++;
         return ret;
@@ -773,7 +770,6 @@ bool RoomService::removeRoom(int64_t roomId)
         playerIt = playerRooms.find(it->second->getPlayer2Id());
         if(playerIt != playerRooms.end() && playerIt->second == roomId)
             playerRooms.erase(playerIt);
-        polls.erase(roomId);
         eraseWebSocketRoomLocked(roomId);
         rooms.erase(it);
         return true;
@@ -793,7 +789,6 @@ bool RoomService::removeFinishedRoomIfExpired(int64_t roomId)
     playerIt = playerRooms.find(it->second->getPlayer2Id());
     if(playerIt != playerRooms.end() && playerIt->second == roomId)
         playerRooms.erase(playerIt);
-    polls.erase(roomId);
     eraseWebSocketRoomLocked(roomId);
     rooms.erase(it);
     return true;
@@ -826,70 +821,6 @@ static RoomService RoomServiceServer;
 RoomService &RoomService::GetServer()
 {
     return RoomServiceServer;
-}
-
-std::pair<bool, uint64_t> RoomService::registerPoll(int roomId, int64_t userId, std::function<void()> &&callback)
-{
-    std::lock_guard<std::mutex> guard(mutex_);
-    auto it = polls.find(roomId);
-    if(it!=polls.end()){
-        if(it->second.players[0]==userId&& !it->second.is_registered[0]){
-            it->second.is_registered[0] = true;
-            it->second.toks[0] = poll_tok_gen;
-            it->second.callback[0] = std::move(callback);
-            return std::make_pair(true, poll_tok_gen++);
-        }
-        if(it->second.players[1]==userId&& !it->second.is_registered[1]){
-            it->second.is_registered[1] = true;
-            it->second.toks[1] = poll_tok_gen;
-            it->second.callback[1] = std::move(callback);
-            return std::make_pair(true, poll_tok_gen++);
-        }
-    }
-    return std::make_pair(false, 0);
-}
-
-void RoomService::invokePolls(int roomId)
-{
-    std::function<void()> cb[2];
-    cb[0] = []()->void{};
-    cb[1] = []()->void{};
-    {
-    std::lock_guard<std::mutex> guard(mutex_);
-    auto it = polls.find(roomId);
-    if(it!=polls.end()){
-        if(it->second.is_registered[0]){
-            it->second.is_registered[0] = false;
-            cb[0] = std::move(it->second.callback[0]);
-        }
-        if(it->second.is_registered[1]){
-            it->second.is_registered[1] = false;
-            cb[1] = std::move(it->second.callback[1]);
-        }
-    }
-    }
-    cb[0]();
-    cb[1]();
-}
-
-void RoomService::invokePollWithToken(int64_t roomId, uint64_t tok)
-{
-    std::function<void()> cb = []()->void{};
-    {
-    std::lock_guard<std::mutex> guard(mutex_);
-    auto it = polls.find(roomId);
-    if(it!=polls.end()){
-        if(it->second.is_registered[0] && it->second.toks[0]==tok){
-            it->second.is_registered[0] = false;
-            cb = std::move(it->second.callback[0]);
-        }
-        if(it->second.is_registered[1] && it->second.toks[1]==tok){
-            it->second.is_registered[1] = false;
-            cb = std::move(it->second.callback[1]);
-        }
-    }
-    }
-    cb();
 }
 
 void RoomService::eraseWebSocketLocked(
@@ -979,6 +910,23 @@ void RoomService::syncWebSocket(
         matchedSubscriber->sequence = sequence;
     }
     sendWebSocketEvents(room, matchedSubscriber);
+}
+
+bool RoomService::getWebSocketRoom(
+    const drogon::WebSocketConnectionPtr &connection,
+    int64_t &roomId,
+    int64_t &userId,
+    std::shared_ptr<BattleRoom> &room)
+{
+    std::lock_guard<std::mutex> guard(mutex_);
+    auto registrationIt = websocketRegistrations.find(connection.get());
+    if(registrationIt == websocketRegistrations.end())return false;
+    auto roomIt = rooms.find(registrationIt->second.roomId);
+    if(roomIt == rooms.end())return false;
+    roomId = registrationIt->second.roomId;
+    userId = registrationIt->second.subscriber->userId;
+    room = roomIt->second;
+    return true;
 }
 
 void RoomService::publishWebSocketEvents(

@@ -9,7 +9,6 @@ class RoomController : public drogon::HttpController<RoomController>
 {
 public:
     METHOD_LIST_BEGIN
-    ADD_METHOD_TO(RoomController::poll, "/battleroom/{1:roomid}/poll", Post);
     ADD_METHOD_TO(RoomController::stat, "/battleroom/{1:roomid}/stat", Get);
     ADD_METHOD_TO(RoomController::snapshot, "/battleroom/{1:roomid}/snapshot", Get);
     ADD_METHOD_TO(RoomController::operation, "/battleroom/{1:roomid}/operation", Post);
@@ -17,11 +16,6 @@ public:
     ADD_METHOD_TO(RoomController::get_current, "/battleroom/current", Get);
     METHOD_LIST_END
 
-    void poll(
-        const HttpRequestPtr &req,
-        std::function<void(const HttpResponsePtr &)> &&callback,
-        const std::string& roomid
-    );
     void stat(
         const HttpRequestPtr &req,
         std::function<void(const HttpResponsePtr &)> &&callback,

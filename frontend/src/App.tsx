@@ -16,10 +16,8 @@ import {
   login,
   logout,
   pollMatch,
-  pollRoom,
   register,
   roomWebSocketUrl,
-  sendOperation,
   updateDeck,
 } from './api';
 import type {
@@ -1032,7 +1030,7 @@ function QueueScreen({
       <aside className="queue-panel">
         <div className="status-orb" />
         <h2>{status}</h2>
-        <p>匹配使用长轮询，房间事件优先使用 WebSocket 并自动降级。</p>
+        <p>匹配结果通过轮询获取；进入房间后，操作与事件只使用 WebSocket。</p>
         <button className="primary-action" disabled={queueing || selectedDeckId == null} onClick={start}>
           Find Match
         </button>
@@ -1096,6 +1094,11 @@ function BattleRoom({
   const requestCounter = useRef(1);
   const sequenceRef = useRef(0);
   const versionRef = useRef(0);
+  const socketRef = useRef<WebSocket | null>(null);
+  const pendingOperations = useRef(new Map<
+    number,
+    { resolve: (result: OperationResult) => void; reject: (error: Error) => void }
+  >());
 
   const refreshSnapshot = useCallback(async () => {
     const data = await getSnapshot(battle.roomId);
@@ -1117,12 +1120,8 @@ function BattleRoom({
   useEffect(() => {
     if (!snapshot) return;
     let active = true;
-    let fallbackEnabled = false;
-    let fallbackLoopActive = false;
-    let fallbackRequest: AbortController | null = null;
     let socket: WebSocket | null = null;
     let reconnectTimer: number | undefined;
-    let connectTimer: number | undefined;
     let processing = Promise.resolve();
 
     async function processEvents(
@@ -1170,73 +1169,54 @@ function BattleRoom({
         .catch(err => onNotice(err instanceof Error ? err.message : 'event sync failed'));
     }
 
-    function stopFallback(abortRequest = false) {
-      fallbackEnabled = false;
-      if (abortRequest) {
-        fallbackRequest?.abort();
-        fallbackRequest = null;
-      }
-    }
-
-    function startFallback() {
-      fallbackEnabled = true;
-      if (!active || fallbackLoopActive) return;
-      fallbackLoopActive = true;
-      void (async () => {
-        try {
-          while (active && fallbackEnabled) {
-            fallbackRequest = new AbortController();
-            try {
-              const result = await pollRoom(
-                battle.roomId,
-                sequenceRef.current,
-                fallbackRequest.signal,
-              );
-              enqueueEvents(result.events ?? []);
-            } catch (err) {
-              if (!active || !fallbackEnabled) return;
-              if (err instanceof DOMException && err.name === 'AbortError') continue;
-              onNotice(err instanceof Error ? err.message : 'room poll failed');
-              await new Promise(resolve => window.setTimeout(resolve, 1200));
-            }
-          }
-        } finally {
-          fallbackLoopActive = false;
-          fallbackRequest = null;
-          if (active && fallbackEnabled) startFallback();
-        }
-      })();
-    }
-
     function connectWebSocket() {
       if (!active) return;
-      let opened = false;
       let currentSocket: WebSocket;
       try {
         currentSocket = new WebSocket(roomWebSocketUrl(battle.roomId, sequenceRef.current));
         socket = currentSocket;
+        socketRef.current = currentSocket;
       } catch {
-        startFallback();
         reconnectTimer = window.setTimeout(connectWebSocket, 4000);
         return;
       }
 
-      connectTimer = window.setTimeout(() => {
-        if (!opened) startFallback();
-      }, 2500);
       currentSocket.onopen = () => {
-        opened = true;
-        if (connectTimer != null) window.clearTimeout(connectTimer);
-        stopFallback();
-        currentSocket.send(JSON.stringify({ type: 'sync', sequence: sequenceRef.current }));
+        currentSocket.send(JSON.stringify([0, sequenceRef.current]));
       };
       currentSocket.onmessage = event => {
         try {
-          const result = JSON.parse(event.data) as {
+          const result = JSON.parse(event.data) as number[] | {
             events?: RoomEvent[];
             batch?: RoomEventBatch;
             snapshot?: RoomSnapshot;
           };
+          if (Array.isArray(result)) {
+            if (result.length !== 4 || result[0] !== 2) throw new Error('invalid response');
+            const [, requestId, errorCode, responseVersion] = result;
+            const pending = pendingOperations.current.get(requestId);
+            if (!pending) return;
+            pendingOperations.current.delete(requestId);
+            const actionErrors = [
+              '',
+              'PlayerNotInRoom',
+              'RoomFinished',
+              'NotYourTurn',
+              'InvalidCard',
+              'InvalidTarget',
+              'InsufficientMana',
+              'BoardFull',
+              'StaleVersion',
+            ];
+            pending.resolve(errorCode === 0
+              ? { state: 'SUCCESS', version: responseVersion }
+              : {
+                  state: 'FAIL',
+                  version: responseVersion,
+                  action_error: actionErrors[errorCode] ?? 'UnknownError',
+                });
+            return;
+          }
           enqueueEvents(
             result.batch ? expandEventBatch(result.batch) : result.events ?? [],
             result.snapshot,
@@ -1248,9 +1228,12 @@ function BattleRoom({
       };
       currentSocket.onerror = () => currentSocket.close();
       currentSocket.onclose = () => {
-        if (connectTimer != null) window.clearTimeout(connectTimer);
+        if (socketRef.current === currentSocket) socketRef.current = null;
+        for (const pending of pendingOperations.current.values()) {
+          pending.reject(new Error('WebSocket disconnected; reconnecting'));
+        }
+        pendingOperations.current.clear();
         if (!active) return;
-        startFallback();
         reconnectTimer = window.setTimeout(connectWebSocket, 4000);
       };
     }
@@ -1258,9 +1241,8 @@ function BattleRoom({
     connectWebSocket();
     return () => {
       active = false;
-      stopFallback(true);
-      if (connectTimer != null) window.clearTimeout(connectTimer);
       if (reconnectTimer != null) window.clearTimeout(reconnectTimer);
+      if (socketRef.current === socket) socketRef.current = null;
       socket?.close();
     };
   }, [battle.roomId, cardsById, onFinished, onNotice, refreshSnapshot, selfId, snapshot !== null]);
@@ -1289,15 +1271,34 @@ function BattleRoom({
     if (!snapshot || busy) return;
     setBusy(true);
     try {
-      const result: OperationResult = await sendOperation(
-        battle.roomId,
-        type,
-        versionRef.current,
-        requestCounter.current++,
-        cardInstance,
-        target,
-        targetType,
-      );
+      const socket = socketRef.current;
+      if (!socket || socket.readyState !== WebSocket.OPEN) {
+        throw new Error('WebSocket is reconnecting');
+      }
+      const requestId = requestCounter.current++;
+      const operationTypes = {
+        'play card': 0,
+        attack: 1,
+        'end turn': 2,
+        surrender: 3,
+      } as const;
+      const result = await new Promise<OperationResult>((resolve, reject) => {
+        pendingOperations.current.set(requestId, { resolve, reject });
+        try {
+          socket.send(JSON.stringify([
+            1,
+            requestId,
+            versionRef.current,
+            operationTypes[type],
+            cardInstance,
+            target,
+            targetType === 'hero' ? 1 : 0,
+          ]));
+        } catch (error) {
+          pendingOperations.current.delete(requestId);
+          reject(error instanceof Error ? error : new Error('operation send failed'));
+        }
+      });
       if (result.state !== 'SUCCESS') {
         onNotice(result.action_error ?? result.message ?? 'operation failed');
         return;

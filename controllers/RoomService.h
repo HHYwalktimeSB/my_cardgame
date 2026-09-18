@@ -136,8 +136,6 @@ private:
 
 };
 
-#include<functional>
-
 class RoomService {
   public:
     using SerializedEventArray = std::shared_ptr<const std::string>;
@@ -154,9 +152,6 @@ class RoomService {
     bool playerLeaveRoom(int64_t roomId, int64_t userId);
     void scheduleFinishedRoomCleanup(int64_t roomId);
     static RoomService& GetServer();
-    std::pair<bool, uint64_t> registerPoll(int roomId, int64_t userId, std::function<void()>&& callback);
-    void invokePolls(int roomId);
-    void invokePollWithToken(int64_t roomid, uint64_t tok);
     void registerWebSocket(
         int64_t roomId,
         int64_t userId,
@@ -166,6 +161,11 @@ class RoomService {
     void syncWebSocket(
         const drogon::WebSocketConnectionPtr &connection,
         uint64_t sequence);
+    bool getWebSocketRoom(
+        const drogon::WebSocketConnectionPtr &connection,
+        int64_t &roomId,
+        int64_t &userId,
+        std::shared_ptr<BattleRoom> &room);
     static SerializedEventArray serializeEventArray(
         const BattleRoom::EventVector &events);
     static std::string serializeSnapshot(
@@ -174,13 +174,6 @@ class RoomService {
         int64_t roomId,
         const BattleRoom::EventVector &sharedEvents,
         const SerializedEventArray &sharedEventArray);
-
-    struct PollStruct{
-        bool is_registered[2];
-        uint64_t toks[2];
-        int64_t players[2];
-        std::function<void()> callback[2];
-    };
 
   private:
     struct WebSocketSubscriber
@@ -211,15 +204,12 @@ class RoomService {
     std::mutex mutex_;
     int64_t room_id_counter{0};
     std::unordered_map<int64_t, std::shared_ptr<BattleRoom>> rooms;
-    std::unordered_map<int64_t, PollStruct >polls;
     std::unordered_map<
         int64_t,
         std::vector<std::shared_ptr<WebSocketSubscriber>>> websocketSubscribers;
     std::unordered_map<
         const drogon::WebSocketConnection *,
         WebSocketRegistration> websocketRegistrations;
-    uint64_t poll_tok_gen;
-
     std::unordered_map<int64_t, int64_t>playerRooms;
 };
 
