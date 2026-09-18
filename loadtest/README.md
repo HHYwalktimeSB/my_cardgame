@@ -77,6 +77,16 @@ diagnostic output bounded. Battle operations and their acknowledgements use the
 same WebSocket connection as battle events; HTTP is only used for setup, login,
 catalog, and initial snapshots.
 
+Initialization failures are reported separately as
+`battle_initialization_failed`, with login, catalog, and snapshot details in
+`battle_login_failures`, `battle_catalog_failures`, and
+`battle_snapshot_failed`. `battle_operation_failed` only includes submitted
+battle operations. Server rejections are split into
+`battle_operation_error_*` counters by action error, while a connection closed
+before acknowledgement is counted as `battle_operation_transport_failures`.
+Failed operations are also written to the bounded diagnostic log even when they
+complete faster than `SLOW_OPERATION_MS`.
+
 WebSocket traffic is reported as `battle_websocket_bytes_received` and
 `battle_websocket_message_size`, including operation acknowledgements. The server
 `/metrics` endpoint exposes event-payload

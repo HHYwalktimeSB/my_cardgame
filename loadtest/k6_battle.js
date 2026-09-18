@@ -30,7 +30,34 @@ const operationMetrics = {
   },
 };
 const operationFailed = new Rate('battle_operation_failed');
+const initializationFailed = new Rate('battle_initialization_failed');
+const loginFailures = new Counter('battle_login_failures');
+const catalogFailures = new Counter('battle_catalog_failures');
 const snapshotFailed = new Rate('battle_snapshot_failed');
+const operationTransportFailures = new Counter('battle_operation_transport_failures');
+const operationUnknownErrors = new Counter('battle_operation_unknown_errors');
+const operationErrorMetrics = [
+  null,
+  new Counter('battle_operation_error_player_not_in_room'),
+  new Counter('battle_operation_error_room_finished'),
+  new Counter('battle_operation_error_not_your_turn'),
+  new Counter('battle_operation_error_invalid_card'),
+  new Counter('battle_operation_error_invalid_target'),
+  new Counter('battle_operation_error_insufficient_mana'),
+  new Counter('battle_operation_error_board_full'),
+  new Counter('battle_operation_error_stale_version'),
+];
+const operationErrorNames = [
+  'none',
+  'player_not_in_room',
+  'room_finished',
+  'not_your_turn',
+  'invalid_card',
+  'invalid_target',
+  'insufficient_mana',
+  'board_full',
+  'stale_version',
+];
 const websocketErrors = new Counter('battle_websocket_errors');
 const websocketEvents = new Counter('battle_websocket_events');
 const websocketConnections = new Counter('battle_websocket_connections');
@@ -76,6 +103,7 @@ export const options = {
     },
   },
   thresholds: {
+    battle_initialization_failed: ['rate<0.01'],
     battle_operation_failed: ['rate<0.01'],
     battle_operation_duration: ['p(95)<200'],
     battle_snapshot_failed: ['rate<0.01'],
@@ -101,6 +129,7 @@ function login(username, jar) {
     },
   );
   check(response, { 'login succeeds': result => result.status === 200 });
+  if (response.status !== 200) loginFailures.add(1);
   return response.status === 200;
 }
 
@@ -109,7 +138,10 @@ function getCardDefinitions(jar) {
     jar,
     tags: { name: 'card_catalog' },
   });
-  if (response.status !== 200) return {};
+  if (response.status !== 200) {
+    catalogFailures.add(1);
+    return null;
+  }
   return Object.fromEntries(response.json('cards').map(card => [Number(card.id), card]));
 }
 
@@ -220,6 +252,25 @@ function recordOperationResult(player, requestId, errorCode, version) {
   operationMetrics[pending.type].duration.add(duration);
   const succeeded = errorCode === 0;
   operationFailed.add(!succeeded);
+  if (!succeeded) {
+    if (errorCode === -1) operationTransportFailures.add(1);
+    else if (operationErrorMetrics[errorCode]) operationErrorMetrics[errorCode].add(1);
+    else operationUnknownErrors.add(1);
+  }
+  if (!succeeded && slowOperationLogs < slowOperationLogLimit) {
+    slowOperationLogs += 1;
+    console.warn(`failed battle operation ${JSON.stringify({
+      room_id: pending.roomId,
+      player_id: player.userId,
+      type: pending.type,
+      version: pending.version,
+      acknowledged_version: version,
+      request_id: requestId,
+      duration_ms: duration,
+      error_code: errorCode,
+      error: operationErrorNames[errorCode] || (errorCode === -1 ? 'transport' : 'unknown'),
+    })}`);
+  }
   if (duration >= slowOperationMilliseconds && slowOperationLogs < slowOperationLogLimit) {
     slowOperationLogs += 1;
     console.warn(`slow battle operation ${JSON.stringify({
@@ -416,11 +467,15 @@ export default function (data) {
 
   if (!login(firstPlayer.username, firstPlayer.jar) ||
       !login(secondPlayer.username, secondPlayer.jar)) {
-    operationFailed.add(true);
+    initializationFailed.add(true);
     return;
   }
   const roomId = preparedBattle.roomId;
   const cardDefinitions = getCardDefinitions(firstPlayer.jar);
+  if (!cardDefinitions) {
+    initializationFailed.add(true);
+    return;
+  }
   const manaCosts = Object.fromEntries(
     Object.entries(cardDefinitions).map(([id, card]) => [id, Number(card.mana_cost)]),
   );
@@ -429,9 +484,10 @@ export default function (data) {
   firstPlayer.snapshot = getSnapshot(roomId, firstPlayer.jar);
   secondPlayer.snapshot = getSnapshot(roomId, secondPlayer.jar);
   if (!firstPlayer.snapshot || !secondPlayer.snapshot) {
-    operationFailed.add(true);
+    initializationFailed.add(true);
     return;
   }
+  initializationFailed.add(false);
 
   const firstSocket = connectEvents(roomId, firstPlayer);
   const secondSocket = connectEvents(roomId, secondPlayer);
