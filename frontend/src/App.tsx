@@ -35,6 +35,22 @@ import type {
   View,
 } from './types';
 
+const websocketMessageTypes = {
+  applyOperation: 1,
+  operationResult: 2,
+} as const;
+const websocketTargetTypes = {
+  minion: 0,
+  hero: 1,
+} as const;
+const operationResultCodes = {
+  success: 0,
+} as const;
+const operationResultFieldCounts = {
+  withoutEvents: 4,
+  withEvents: 5,
+} as const;
+
 function cardName(cardsById: Map<number, CardCatalogItem>, cardId?: number) {
   if (!cardId) return 'Unknown Card';
   return cardsById.get(cardId)?.name ?? `Card #${cardId}`;
@@ -136,7 +152,9 @@ function expandCompactEvent(event: number[], roomVersion: number, sequence: numb
     ...(cardId >= 0 ? { card_id: cardId } : {}),
     ...(cardInstance >= 0 ? { card_instance: cardInstance } : {}),
     ...(targetId >= 0 ? { target_id: targetId } : {}),
-    ...(targetType === 1 ? { target_type: 'hero' as const } : {}),
+    ...(targetType === websocketTargetTypes.hero
+      ? { target_type: 'hero' as const }
+      : {}),
   };
 }
 
@@ -1191,7 +1209,9 @@ function BattleRoom({
             snapshot?: RoomSnapshot;
           };
           if (Array.isArray(result)) {
-            if ((result.length !== 4 && result.length !== 5) || result[0] !== 2) {
+            if ((result.length !== operationResultFieldCounts.withoutEvents &&
+                 result.length !== operationResultFieldCounts.withEvents) ||
+                result[0] !== websocketMessageTypes.operationResult) {
               throw new Error('invalid response');
             }
             const [, requestId, errorCode, responseVersion, batch] = result;
@@ -1208,8 +1228,9 @@ function BattleRoom({
                 'InsufficientMana',
                 'BoardFull',
                 'StaleVersion',
+                'ServerBusy',
               ];
-              pending.resolve(errorCode === 0
+              pending.resolve(errorCode === operationResultCodes.success
                 ? { state: 'SUCCESS', version: responseVersion }
                 : {
                     state: 'FAIL',
@@ -1289,13 +1310,15 @@ function BattleRoom({
         pendingOperations.current.set(requestId, { resolve, reject });
         try {
           socket.send(JSON.stringify([
-            1,
+            websocketMessageTypes.applyOperation,
             requestId,
             versionRef.current,
             operationTypes[type],
             cardInstance,
             target,
-            targetType === 'hero' ? 1 : 0,
+            targetType === 'hero'
+              ? websocketTargetTypes.hero
+              : websocketTargetTypes.minion,
           ]));
         } catch (error) {
           pendingOperations.current.delete(requestId);

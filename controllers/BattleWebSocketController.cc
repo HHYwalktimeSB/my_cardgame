@@ -1,5 +1,6 @@
 #include "BattleWebSocketController.h"
 
+#include "BattleWebSocketProtocol.h"
 #include "RoomService.h"
 #include "session_check.h"
 
@@ -8,6 +9,10 @@
 
 namespace
 {
+
+using cardgame::websocket_protocol::ClientMessageType;
+using cardgame::websocket_protocol::ServerMessageType;
+using cardgame::websocket_protocol::WireTargetType;
 
 bool parse_uint64(const std::string &text, uint64_t &value)
 {
@@ -31,7 +36,10 @@ void send_operation_result(
 {
     std::string response;
     response.reserve(64);
-    response += "[2,";
+    response += '[';
+    response += std::to_string(static_cast<int>(
+        ServerMessageType::OperationResult));
+    response += ',';
     response += std::to_string(requestId);
     response += ',';
     response += std::to_string(static_cast<int>(result.error));
@@ -88,32 +96,44 @@ void BattleWebSocketController::handleNewMessage(
     std::istringstream stream(message);
     if(!Json::parseFromStream(builder, stream, &root, &errors) ||
        !root.isArray() || root.empty() ||
-       !root[static_cast<Json::ArrayIndex>(0)].isIntegral())
+       !root[cardgame::websocket_protocol::kMessageTypeField].isIntegral())
     {
         connection->shutdown(drogon::CloseCode::kWrongMessageContent, "invalid message");
         return;
     }
 
     const int messageType =
-        root[static_cast<Json::ArrayIndex>(0)].asInt();
-    if(messageType == 0 && root.size() == 2 && root[1].isUInt64())
+        root[cardgame::websocket_protocol::kMessageTypeField].asInt();
+    if(messageType == static_cast<int>(ClientMessageType::SyncEvents) &&
+       root.size() == cardgame::websocket_protocol::kSyncMessageFieldCount &&
+       root[cardgame::websocket_protocol::kRequestIdField].isUInt64())
     {
-        RoomService::GetServer().syncWebSocket(connection, root[1].asUInt64());
+        RoomService::GetServer().syncWebSocket(
+            connection,
+            root[cardgame::websocket_protocol::kRequestIdField].asUInt64());
         return;
     }
-    if(messageType != 1 || root.size() != 7 ||
-       !root[1].isUInt64() || !root[2].isUInt64() ||
-       !root[3].isInt() || !root[4].isInt64() ||
-       !root[5].isInt64() || !root[6].isInt())
+    if(messageType != static_cast<int>(ClientMessageType::ApplyOperation) ||
+       root.size() != cardgame::websocket_protocol::kOperationMessageFieldCount ||
+       !root[cardgame::websocket_protocol::kRequestIdField].isUInt64() ||
+       !root[cardgame::websocket_protocol::kExpectedVersionField].isUInt64() ||
+       !root[cardgame::websocket_protocol::kOperationTypeField].isInt() ||
+       !root[cardgame::websocket_protocol::kCardInstanceField].isInt64() ||
+       !root[cardgame::websocket_protocol::kTargetIdField].isInt64() ||
+       !root[cardgame::websocket_protocol::kTargetTypeField].isInt())
     {
         connection->shutdown(drogon::CloseCode::kWrongMessageContent, "invalid message");
         return;
     }
 
-    const int operationType = root[3].asInt();
-    const int targetType = root[6].asInt();
-    if(operationType < 0 || operationType > 3 ||
-       targetType < 0 || targetType > 1)
+    const int operationType =
+        root[cardgame::websocket_protocol::kOperationTypeField].asInt();
+    const int targetType =
+        root[cardgame::websocket_protocol::kTargetTypeField].asInt();
+    if(operationType < static_cast<int>(BattleRoom::OperationType::PlayCard) ||
+       operationType > static_cast<int>(BattleRoom::OperationType::Surrender) ||
+       targetType < static_cast<int>(WireTargetType::Minion) ||
+       targetType > static_cast<int>(WireTargetType::Hero))
     {
         connection->shutdown(drogon::CloseCode::kWrongMessageContent, "invalid operation");
         return;
@@ -130,11 +150,15 @@ void BattleWebSocketController::handleNewMessage(
     }
 
     BattleRoom::Operation operation;
-    operation.requestId = root[1].asUInt64();
-    operation.expectedVersion = root[2].asUInt64();
+    operation.requestId =
+        root[cardgame::websocket_protocol::kRequestIdField].asUInt64();
+    operation.expectedVersion =
+        root[cardgame::websocket_protocol::kExpectedVersionField].asUInt64();
     operation.type = static_cast<BattleRoom::OperationType>(operationType);
-    operation.cardInstanceId = root[4].asInt64();
-    operation.targetId = root[5].asInt64();
+    operation.cardInstanceId =
+        root[cardgame::websocket_protocol::kCardInstanceField].asInt64();
+    operation.targetId =
+        root[cardgame::websocket_protocol::kTargetIdField].asInt64();
     operation.targetType = static_cast<BattleRoom::TargetType>(targetType);
 
     auto result = room->applyOperation(userId, operation);
@@ -144,13 +168,10 @@ void BattleWebSocketController::handleNewMessage(
         return;
     }
 
-    auto serializedEvents = RoomService::serializeEventArray(
-        result.generatedEvents);
     if(room->isFinished())service.scheduleFinishedRoomCleanup(roomId);
     if(!service.publishWebSocketEvents(
            roomId,
-           result.generatedEvents,
-           serializedEvents,
+           result.publishEvents,
            connection,
            operation.requestId,
            result.version))

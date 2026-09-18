@@ -1,6 +1,7 @@
 #include "RoomService.h"
 #include "BattleEngine.h"
 #include "BattleJsonWriter.h"
+#include "BattleWebSocketProtocol.h"
 #include<algorithm>
 #include<optional>
 #include<random>
@@ -114,7 +115,9 @@ void append_compact_event_json(
     writer.integer(event.cardId);
     writer.integer(event.instanceId);
     writer.integer(event.targetId);
-    writer.integer(event.targetType == BattleRoom::TargetType::Hero ? 1 : 0);
+    writer.integer(event.targetType == BattleRoom::TargetType::Hero
+        ? static_cast<int>(cardgame::websocket_protocol::WireTargetType::Hero)
+        : static_cast<int>(cardgame::websocket_protocol::WireTargetType::Minion));
     writer.integer(event.value);
     writer.endArray();
 }
@@ -219,6 +222,19 @@ bool have_same_events(
         });
 }
 
+BattleRoom::EventVector visible_events(
+    const BattleRoom::EventVector &events,
+    BattleRoom::EventVisibility privateVisibility)
+{
+    BattleRoom::EventVector visible;
+    visible.reserve(events.size());
+    for(const auto &event : events)
+        if(event.visibility == BattleRoom::EventVisibility::Public ||
+           event.visibility == privateVisibility)
+            visible.push_back(event);
+    return visible;
+}
+
 std::optional<cardgame::CardType> parse_card_type(const std::string &type)
 {
     if(type == "minion")return cardgame::CardType::Minion;
@@ -309,7 +325,7 @@ RoomService::SerializedEventArray RoomService::serializeEventArray(
         writer.key("first_sequence");
         writer.integer(events.front().sequence);
         writer.key("format");
-        writer.integer(1);
+        writer.integer(cardgame::websocket_protocol::kCompactEventFormatVersion);
     }
     writer.key("events");
     writer.beginArray();
@@ -368,17 +384,25 @@ std::string RoomService::serializeSnapshot(
 
 BattleRoom::ActionResult  BattleRoom::applyOperation(int64_t userId, const Operation &operation)
 {
+    const size_t queued = queuedOperations_.fetch_add(1, std::memory_order_acq_rel);
+    if(queued >= max_queued_operations)
+    {
+        queuedOperations_.fetch_sub(1, std::memory_order_release);
+        return {ActionError::ServerBusy, operation.expectedVersion, {}, {}};
+    }
+    std::unique_lock<std::mutex> operation_guard(operationMutex_);
+    queuedOperations_.fetch_sub(1, std::memory_order_release);
     std::lock_guard<std::mutex> lock_guard(mutex_);
     int request_player;
     if (userId == state_.players[0].userId)request_player = 0;
     else if (userId == state_.players[1].userId)request_player = 1;
-    else return {ActionError::PlayerNotInRoom, version_, {}};
+    else return {ActionError::PlayerNotInRoom, version_, {}, {}};
     {//check if the request is processed
         auto it = processed_op[request_player].find(operation.requestId);
         if(it!=processed_op[request_player].end())return it->second;
     }
     if(operation.expectedVersion != version_)
-        return {ActionError::StaleVersion, version_, {}};
+        return {ActionError::StaleVersion, version_, {}, {}};
 
     const RoomStatus previous_status = state_.status;
     auto resolution = cardgame::BattleEngine::resolve(
@@ -390,7 +414,7 @@ BattleRoom::ActionResult  BattleRoom::applyOperation(int64_t userId, const Opera
     if(resolution.error == ActionError::RoomFinished ||
        resolution.error == ActionError::PlayerNotInRoom ||
        resolution.error == ActionError::NotYourTurn)
-        return {resolution.error, version_, {}};
+        return {resolution.error, version_, {}, {}};
 
     if(resolution.error == ActionError::None)
     {
@@ -402,6 +426,8 @@ BattleRoom::ActionResult  BattleRoom::applyOperation(int64_t userId, const Opera
             finishedAt_ = std::chrono::steady_clock::now();
         }
     }
+
+    auto publishEvents = resolution.generatedEvents;
 
     //copy to event queue
     for(auto & elem : resolution.generatedEvents){
@@ -423,7 +449,8 @@ BattleRoom::ActionResult  BattleRoom::applyOperation(int64_t userId, const Opera
     ActionResult res = {
         resolution.error,
         version_,
-        std::move(resolution.generatedEvents)};
+        std::move(resolution.generatedEvents),
+        std::move(publishEvents)};
     while(processed_op_q[request_player].size()>=max_requestid_stored){
         processed_op[request_player].erase(processed_op_q[request_player].front());
         processed_op_q[request_player].pop();
@@ -934,7 +961,6 @@ bool RoomService::getWebSocketRoom(
 bool RoomService::publishWebSocketEvents(
     int64_t roomId,
     const BattleRoom::EventVector &sharedEvents,
-    const SerializedEventArray &sharedEventArray,
     const drogon::WebSocketConnectionPtr &operationConnection,
     uint64_t requestId,
     uint64_t version)
@@ -965,16 +991,50 @@ bool RoomService::publishWebSocketEvents(
             storedSubscribers.end());
         subscribers = storedSubscribers;
     }
+    const int64_t playerOne = room->getPlayer1Id();
+    auto playerOneEvents = visible_events(
+        sharedEvents, BattleRoom::EventVisibility::PlayerOneOnly);
+    auto playerTwoEvents = visible_events(
+        sharedEvents, BattleRoom::EventVisibility::PlayerTwoOnly);
+    auto playerOneSerialized = serializeEventArray(playerOneEvents);
+    const bool sharedVisibility = have_same_events(
+        playerOneEvents, playerTwoEvents);
+    auto playerTwoSerialized = sharedVisibility
+        ? playerOneSerialized
+        : serializeEventArray(playerTwoEvents);
+    auto playerOneMessage = std::make_shared<const std::string>(
+        serialize_websocket_events(*playerOneSerialized));
+    auto playerTwoMessage = sharedVisibility
+        ? playerOneMessage
+        : std::make_shared<const std::string>(
+            serialize_websocket_events(*playerTwoSerialized));
+    const uint64_t firstSequence =
+        sharedEvents.empty() ? 0 : sharedEvents.front().sequence;
+    const uint64_t lastSequence =
+        sharedEvents.empty() ? 0 : sharedEvents.back().sequence;
     bool operationAcknowledged = false;
     for(const auto &subscriber : subscribers)
     {
         const bool isOperationConnection = operationConnection &&
             subscriber->connectionKey == operationConnection.get();
+        const bool isPlayerOne = subscriber->userId == playerOne;
+        const auto &visibleEvents = isPlayerOne
+            ? playerOneEvents
+            : playerTwoEvents;
+        const auto &serializedEvents = isPlayerOne
+            ? playerOneSerialized
+            : playerTwoSerialized;
+        const auto &serializedMessage = isPlayerOne
+            ? playerOneMessage
+            : playerTwoMessage;
         sendWebSocketEvents(
             room,
             subscriber,
-            &sharedEvents,
-            sharedEventArray,
+            &visibleEvents,
+            serializedEvents,
+            serializedMessage,
+            firstSequence,
+            lastSequence,
             isOperationConnection ? &requestId : nullptr,
             version);
         operationAcknowledged |= isOperationConnection;
@@ -987,38 +1047,59 @@ void RoomService::sendWebSocketEvents(
     const std::shared_ptr<WebSocketSubscriber> &subscriber,
     const BattleRoom::EventVector *sharedEvents,
     const SerializedEventArray &sharedEventArray,
+    const SerializedWebSocketMessage &sharedMessage,
+    uint64_t publishedFirstSequence,
+    uint64_t publishedLastSequence,
     const uint64_t *requestId,
     uint64_t version)
 {
     std::lock_guard<std::mutex> guard(subscriber->mutex);
     auto connection = subscriber->connection.lock();
     if(!connection || !connection->connected())return;
-    bool validViewer = false;
-    auto events = room->getEventsAfter(
-        subscriber->sequence,
-        subscriber->userId,
-        validViewer);
+    BattleRoom::EventVector events;
+    bool validViewer = true;
+    const bool isContiguous = publishedFirstSequence != 0 &&
+        subscriber->sequence + 1 == publishedFirstSequence;
+    if(isContiguous)
+    {
+        events = *sharedEvents;
+        subscriber->sequence = publishedLastSequence;
+    }
+    else
+    {
+        events = room->getEventsAfter(
+            subscriber->sequence,
+            subscriber->userId,
+            validViewer);
+        for(const auto &event : events)
+            subscriber->sequence = std::max(
+                subscriber->sequence,
+                event.sequence);
+    }
     if(!validViewer)
     {
         connection->shutdown(drogon::CloseCode::kViolation, "player not in room");
         return;
     }
-    for(const auto &event : events)
-        subscriber->sequence = std::max(
-            subscriber->sequence,
-            event.sequence);
     if(events.empty() && !requestId)return;
-    auto serializedEvents = sharedEventArray;
-    if(!serializedEvents || !sharedEvents ||
-       !have_same_events(events, *sharedEvents))
+    auto serializedEvents = isContiguous
+        ? sharedEventArray
+        : SerializedEventArray{};
+    if(!serializedEvents)
         serializedEvents = serializeEventArray(events);
-    std::string message;
     if(requestId)
     {
+        std::string message;
         message.reserve(serializedEvents->size() + 64);
-        message += "[2,";
+        message += '[';
+        message += std::to_string(static_cast<int>(
+            cardgame::websocket_protocol::ServerMessageType::OperationResult));
+        message += ',';
         message += std::to_string(*requestId);
-        message += ",0,";
+        message += ',';
+        message += std::to_string(static_cast<int>(
+            BattleRoom::ActionError::None));
+        message += ',';
         message += std::to_string(version);
         if(!events.empty())
         {
@@ -1026,8 +1107,18 @@ void RoomService::sendWebSocketEvents(
             message += *serializedEvents;
         }
         message += ']';
+        record_websocket_message(message.size());
+        connection->send(message);
     }
-    else message = serialize_websocket_events(*serializedEvents);
-    record_websocket_message(message.size());
-    connection->send(std::move(message));
+    else if(isContiguous && sharedMessage)
+    {
+        record_websocket_message(sharedMessage->size());
+        connection->send(*sharedMessage);
+    }
+    else
+    {
+        auto message = serialize_websocket_events(*serializedEvents);
+        record_websocket_message(message.size());
+        connection->send(message);
+    }
 }

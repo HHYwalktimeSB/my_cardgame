@@ -8,6 +8,7 @@
 #include<chrono>
 #include<unordered_map>
 #include<unordered_set>
+#include<atomic>
 #include<jsoncpp/json/json.h>
 #include<drogon/WebSocketConnection.h>
 #include<bits/shared_ptr.h>
@@ -66,6 +67,7 @@ public:
     int64_t getPlayer2Id()const { std::lock_guard<std::mutex> guard(mutex_); return state_.players[1].userId; }
     static constexpr int max_requestid_stored = 64;
     static constexpr int max_event_stored = 256;
+    static constexpr size_t max_queued_operations = 8;
     struct RoomSnapshot{
         struct Card
         {
@@ -118,6 +120,8 @@ private:
         return {nextSequence++, version_, type, visibility, cardId, actorid, targetid, instanceid, value};
     }
     mutable std::mutex mutex_;
+    std::mutex operationMutex_;
+    std::atomic<size_t> queuedOperations_{0};
 
     int64_t roomId_;
     int64_t matchId_;
@@ -139,6 +143,7 @@ private:
 class RoomService {
   public:
     using SerializedEventArray = std::shared_ptr<const std::string>;
+    using SerializedWebSocketMessage = std::shared_ptr<const std::string>;
 
     std::shared_ptr<BattleRoom> createRoom(const MatchInfo &match);
 
@@ -173,7 +178,6 @@ class RoomService {
     bool publishWebSocketEvents(
         int64_t roomId,
         const BattleRoom::EventVector &sharedEvents,
-        const SerializedEventArray &sharedEventArray,
         const drogon::WebSocketConnectionPtr &operationConnection = {},
         uint64_t requestId = 0,
         uint64_t version = 0);
@@ -203,6 +207,9 @@ class RoomService {
         const std::shared_ptr<WebSocketSubscriber> &subscriber,
         const BattleRoom::EventVector *sharedEvents = nullptr,
         const SerializedEventArray &sharedEventArray = {},
+        const SerializedWebSocketMessage &sharedMessage = {},
+        uint64_t publishedFirstSequence = 0,
+        uint64_t publishedLastSequence = 0,
         const uint64_t *requestId = nullptr,
         uint64_t version = 0);
 

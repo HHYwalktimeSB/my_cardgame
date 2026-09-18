@@ -167,7 +167,8 @@ enum class ActionError
     InvalidTarget,
     InsufficientMana,
     BoardFull,
-    StaleVersion
+    StaleVersion,
+    ServerBusy
 };
 
 struct ActionResult
@@ -175,6 +176,7 @@ struct ActionResult
     ActionError error;
     uint64_t version;
     EventVector generatedEvents;
+    EventVector publishEvents;
 };
 
 struct CardInstance

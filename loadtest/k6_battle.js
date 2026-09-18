@@ -47,6 +47,7 @@ const operationErrorMetrics = [
   new Counter('battle_operation_error_insufficient_mana'),
   new Counter('battle_operation_error_board_full'),
   new Counter('battle_operation_error_stale_version'),
+  new Counter('battle_operation_error_server_busy'),
 ];
 const operationErrorNames = [
   'none',
@@ -58,6 +59,7 @@ const operationErrorNames = [
   'insufficient_mana',
   'board_full',
   'stale_version',
+  'server_busy',
 ];
 const websocketErrors = new Counter('battle_websocket_errors');
 const websocketHandshakeFailures = new Counter('battle_websocket_handshake_failures');
@@ -71,6 +73,19 @@ const deathrattleMinionDeaths = new Counter('battle_deathrattle_minion_deaths');
 const deathrattleEffectEvents = new Counter('battle_deathrattle_effect_events');
 let slowOperationLogs = 0;
 let websocketDiagnosticLogs = 0;
+
+const websocketMessageTypes = {
+  applyOperation: 1,
+  operationResult: 2,
+};
+const websocketTargetTypes = {
+  minion: 0,
+  hero: 1,
+};
+const operationResultCodes = {
+  success: 0,
+  transportFailure: -1,
+};
 
 const websocketOperationTypes = {
   'play card': 0,
@@ -95,7 +110,7 @@ function expandCompactEvent(event) {
     ...(cardId >= 0 ? { card_id: cardId } : {}),
     ...(cardInstance >= 0 ? { card_instance: cardInstance } : {}),
     ...(targetId >= 0 ? { target_id: targetId } : {}),
-    ...(targetType === 1 ? { target_type: 'hero' } : {}),
+    ...(targetType === websocketTargetTypes.hero ? { target_type: 'hero' } : {}),
   };
 }
 
@@ -252,20 +267,22 @@ function getSnapshot(roomId, jar) {
   return response.status === 200 ? JSON.parse(response.body) : null;
 }
 
-function recordOperationResult(player, requestId, errorCode, version) {
+function recordOperationResult(player, roomControl, requestId, errorCode, version) {
   const pending = player.pendingOperation;
   if (!pending || pending.requestId !== requestId) {
     websocketErrors.add(1);
     return;
   }
   player.pendingOperation = null;
+  roomControl.operationPending = false;
   const duration = Date.now() - pending.startedAt;
   operationDuration.add(duration);
   operationMetrics[pending.type].duration.add(duration);
-  const succeeded = errorCode === 0;
+  const succeeded = errorCode === operationResultCodes.success;
   operationFailed.add(!succeeded);
   if (!succeeded) {
-    if (errorCode === -1) operationTransportFailures.add(1);
+    if (errorCode === operationResultCodes.transportFailure)
+      operationTransportFailures.add(1);
     else if (operationErrorMetrics[errorCode]) operationErrorMetrics[errorCode].add(1);
     else operationUnknownErrors.add(1);
   }
@@ -280,7 +297,8 @@ function recordOperationResult(player, requestId, errorCode, version) {
       request_id: requestId,
       duration_ms: duration,
       error_code: errorCode,
-      error: operationErrorNames[errorCode] || (errorCode === -1 ? 'transport' : 'unknown'),
+      error: operationErrorNames[errorCode] ||
+        (errorCode === operationResultCodes.transportFailure ? 'transport' : 'unknown'),
     })}`);
   }
   if (duration >= slowOperationMilliseconds && slowOperationLogs < slowOperationLogLimit) {
@@ -302,20 +320,22 @@ function recordOperationResult(player, requestId, errorCode, version) {
   }
 }
 
-function markWebSocketClosed(player) {
+function markWebSocketClosed(player, roomControl) {
   player.websocketOpen = false;
   if (player.pendingOperation) {
     recordOperationResult(
       player,
+      roomControl,
       player.pendingOperation.requestId,
-      -1,
+      operationResultCodes.transportFailure,
       player.snapshot?.version || 0,
     );
   }
 }
 
-function sendOperation(roomId, player, operation) {
-  if (!player.websocketOpen || player.pendingOperation) return false;
+function sendOperation(roomId, player, roomControl, operation) {
+  if (!player.websocketOpen || player.pendingOperation ||
+      roomControl.operationPending) return false;
   const requestId = player.requestId++;
   operationMetrics[operation.type].count.add(1);
   player.pendingOperation = {
@@ -324,25 +344,28 @@ function sendOperation(roomId, player, operation) {
     requestId,
     startedAt: Date.now(),
   };
+  roomControl.operationPending = true;
   try {
     player.socket.send(JSON.stringify([
-      1,
+      websocketMessageTypes.applyOperation,
       requestId,
       operation.version,
       websocketOperationTypes[operation.type],
       operation.cardInstance || 0,
       operation.target == null ? -1 : operation.target,
-      operation.targetType === 'hero' ? 1 : 0,
+      operation.targetType === 'hero'
+        ? websocketTargetTypes.hero
+        : websocketTargetTypes.minion,
     ]));
   } catch {
     websocketErrors.add(1);
-    markWebSocketClosed(player);
+    markWebSocketClosed(player, roomControl);
     return false;
   }
   return true;
 }
 
-function connectEvents(roomId, player) {
+function connectEvents(roomId, player, roomControl) {
   let intentionalClose = false;
   let opened = false;
   let connectionFailureRecorded = false;
@@ -357,6 +380,7 @@ function connectEvents(roomId, player) {
     opened = true;
     player.websocketOpen = true;
     websocketConnections.add(1);
+    roomControl.scheduleAction();
   });
   socket.addEventListener('message', event => {
     try {
@@ -369,12 +393,16 @@ function connectEvents(roomId, player) {
       let batch;
       let acknowledgedOperation = null;
       let operationSucceeded = false;
-      if (Array.isArray(message) && message[0] === 2) {
+      if (Array.isArray(message) &&
+          message[0] === websocketMessageTypes.operationResult) {
         acknowledgedOperation = player.pendingOperation;
-        operationSucceeded = message[2] === 0;
-        recordOperationResult(player, message[1], message[2], message[3]);
+        operationSucceeded = message[2] === operationResultCodes.success;
+        recordOperationResult(player, roomControl, message[1], message[2], message[3]);
         batch = message[4];
-        if (!batch) return;
+        if (!batch) {
+          roomControl.scheduleAction();
+          return;
+        }
       }
       else batch = message.batch;
       const events = (batch?.events || message.events || []).map((rawItem, index) => {
@@ -395,6 +423,7 @@ function connectEvents(roomId, player) {
       }
       if (message.snapshot) player.snapshot = message.snapshot;
       else if (player.snapshot) applyEvents(player.snapshot, events, player.cards, player.userId);
+      roomControl.scheduleAction();
     } catch {
       websocketErrors.add(1);
     }
@@ -412,7 +441,7 @@ function connectEvents(roomId, player) {
         error: event?.error == null ? null : String(event.error),
       })}`);
     }
-    markWebSocketClosed(player);
+    markWebSocketClosed(player, roomControl);
   });
   socket.addEventListener('close', event => {
     if (!intentionalClose && opened) websocketUnexpectedCloses.add(1);
@@ -427,12 +456,12 @@ function connectEvents(roomId, player) {
         reason: event?.reason ?? null,
       })}`);
     }
-    markWebSocketClosed(player);
+    markWebSocketClosed(player, roomControl);
   });
   return {
     close() {
       intentionalClose = true;
-      markWebSocketClosed(player);
+      markWebSocketClosed(player, roomControl);
       socket.close();
     },
   };
@@ -540,11 +569,19 @@ export default function (data) {
   }
   initializationFailed.add(false);
 
-  const firstSocket = connectEvents(roomId, firstPlayer);
-  const secondSocket = connectEvents(roomId, secondPlayer);
-  const actionTimer = setInterval(() => {
+  const roomControl = {
+    operationPending: false,
+    actionTimer: null,
+    closed: false,
+    scheduleAction: null,
+  };
+  function runNextOperation() {
+    if (roomControl.closed || roomControl.operationPending ||
+        !firstPlayer.websocketOpen || !secondPlayer.websocketOpen) return;
     const publicSnapshot = firstPlayer.snapshot;
     if (!publicSnapshot || publicSnapshot.room_state !== 'playing') return;
+    if (!secondPlayer.snapshot ||
+        publicSnapshot.version !== secondPlayer.snapshot.version) return;
     const actor = publicSnapshot.current_player === firstPlayer.userId
       ? firstPlayer
       : secondPlayer;
@@ -562,7 +599,7 @@ export default function (data) {
     const target = opponentState.board[0];
 
     if (attacker && target) {
-      sendOperation(roomId, actor, {
+      sendOperation(roomId, actor, roomControl, {
         type: 'attack',
         version: snapshot.version,
         cardInstance: attacker.instance_id,
@@ -574,28 +611,41 @@ export default function (data) {
       const playableCard = snapshot.my_hand.find(card =>
         card.card_id && manaCosts[card.card_id] <= actorState.mana);
       if (!playableCard) {
-        sendOperation(roomId, actor, {
+        sendOperation(roomId, actor, roomControl, {
           type: 'end turn',
           version: snapshot.version,
         });
         return;
       }
-      sendOperation(roomId, actor, {
+      sendOperation(roomId, actor, roomControl, {
         type: 'play card',
         version: snapshot.version,
         cardInstance: playableCard.instance_id,
         cardId: playableCard.card_id,
       });
     } else {
-      sendOperation(roomId, actor, {
+      sendOperation(roomId, actor, roomControl, {
         type: 'end turn',
         version: snapshot.version,
       });
     }
-  }, actionIntervalMilliseconds);
+  }
+  roomControl.scheduleAction = () => {
+    if (roomControl.closed || roomControl.operationPending ||
+        roomControl.actionTimer !== null) return;
+    roomControl.actionTimer = setTimeout(() => {
+      roomControl.actionTimer = null;
+      runNextOperation();
+    }, actionIntervalMilliseconds);
+  };
+
+  const firstSocket = connectEvents(roomId, firstPlayer, roomControl);
+  const secondSocket = connectEvents(roomId, secondPlayer, roomControl);
 
   setTimeout(() => {
-    clearInterval(actionTimer);
+    roomControl.closed = true;
+    if (roomControl.actionTimer !== null)
+      clearTimeout(roomControl.actionTimer);
     firstSocket.close();
     secondSocket.close();
   }, durationSeconds * 1000);

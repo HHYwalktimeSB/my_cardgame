@@ -141,18 +141,18 @@ void RoomController::operation(const HttpRequestPtr &req, std::function<void(con
         case BattleRoom::ActionError::StaleVersion:
         res["action_error"] = "StaleVersion";
         break;
+        case BattleRoom::ActionError::ServerBusy:
+        res["action_error"] = "ServerBusy";
+        break;
         default:
         success = true;
     }
     if(success){
-        auto serializedEvents = RoomService::serializeEventArray(
-            result.generatedEvents);
         if(room->isFinished())
             RoomService::GetServer().scheduleFinishedRoomCleanup(roomId);
         RoomService::GetServer().publishWebSocketEvents(
             roomId,
-            result.generatedEvents,
-            serializedEvents);
+            result.publishEvents);
         auto resp = HttpResponse::newHttpResponse();
         resp->setContentTypeCode(CT_APPLICATION_JSON);
         resp->setBody(make_operation_success_json(result.version));
