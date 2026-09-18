@@ -70,12 +70,16 @@ stable stage. `DURATION` and `ACTION_INTERVAL_MS` customize the workload.
 
 The JSON summary reports operation counts and latency separately for attacks,
 card plays, and end turns. Operations slower than `SLOW_OPERATION_MS` (1000 ms by
-default) are written to the matching `.log` file with their room, card, version,
-and HTTP timing details. At most `SLOW_OPERATION_LOG_LIMIT` entries (5 by default)
-are logged per VU to keep diagnostic output bounded.
+default) are written to the matching `.log` file with their room, card, submitted
+and acknowledged versions, WebSocket round-trip time, and server error code. At
+most `SLOW_OPERATION_LOG_LIMIT` entries (5 by default) are logged per VU to keep
+diagnostic output bounded. Battle operations and their acknowledgements use the
+same WebSocket connection as battle events; HTTP is only used for setup, login,
+catalog, and initial snapshots.
 
 WebSocket traffic is reported as `battle_websocket_bytes_received` and
-`battle_websocket_message_size`. The server `/metrics` endpoint exposes matching
+`battle_websocket_message_size`, including operation acknowledgements. The server
+`/metrics` endpoint exposes event-payload
 `battle_websocket_payload_bytes_total` and `battle_websocket_messages_total`
 counters for measuring outbound payload independently of k6 HTTP traffic.
 

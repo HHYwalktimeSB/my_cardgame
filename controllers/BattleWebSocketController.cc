@@ -87,13 +87,15 @@ void BattleWebSocketController::handleNewMessage(
     std::string errors;
     std::istringstream stream(message);
     if(!Json::parseFromStream(builder, stream, &root, &errors) ||
-       !root.isArray() || root.empty() || !root[0].isIntegral())
+       !root.isArray() || root.empty() ||
+       !root[static_cast<Json::ArrayIndex>(0)].isIntegral())
     {
         connection->shutdown(drogon::CloseCode::kWrongMessageContent, "invalid message");
         return;
     }
 
-    const int messageType = root[0].asInt();
+    const int messageType =
+        root[static_cast<Json::ArrayIndex>(0)].asInt();
     if(messageType == 0 && root.size() == 2 && root[1].isUInt64())
     {
         RoomService::GetServer().syncWebSocket(connection, root[1].asUInt64());

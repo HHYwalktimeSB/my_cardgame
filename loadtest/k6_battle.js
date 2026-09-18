@@ -38,6 +38,13 @@ const websocketBytesReceived = new Counter('battle_websocket_bytes_received');
 const websocketMessageSize = new Trend('battle_websocket_message_size', true);
 let slowOperationLogs = 0;
 
+const websocketOperationTypes = {
+  'play card': 0,
+  attack: 1,
+  'end turn': 2,
+  surrender: 3,
+};
+
 const compactEventTypes = [
   'game_end', 'player_1_start_turn', 'player_2_start_turn', 'card_play',
   'player_1_drawcard', 'player_2_drawcard', 'card_discard', 'card_destory',
@@ -201,51 +208,75 @@ function getSnapshot(roomId, jar) {
   return response.status === 200 ? response.json() : null;
 }
 
-function sendOperation(roomId, player, operation) {
-  const startedAt = Date.now();
-  const requestId = player.requestId++;
-  const response = http.post(
-    `${baseUrl}/battleroom/${roomId}/operation`,
-    JSON.stringify({
-      type: operation.type,
-      version: operation.version,
-      request_id: requestId,
-      card_instance: operation.cardInstance || 0,
-      target: operation.target == null ? -1 : operation.target,
-      target_type: operation.targetType || 'minion',
-    }),
-    {
-      jar: player.jar,
-      headers: { 'Content-Type': 'application/json' },
-      tags: { name: 'battle_operation', operation: operation.type },
-    },
-  );
-  const duration = Date.now() - startedAt;
+function recordOperationResult(player, requestId, errorCode, version) {
+  const pending = player.pendingOperation;
+  if (!pending || pending.requestId !== requestId) {
+    websocketErrors.add(1);
+    return;
+  }
+  player.pendingOperation = null;
+  const duration = Date.now() - pending.startedAt;
   operationDuration.add(duration);
-  operationMetrics[operation.type].count.add(1);
-  operationMetrics[operation.type].duration.add(duration);
-  const succeeded = response.status === 200 && response.json('state') === 'SUCCESS';
+  operationMetrics[pending.type].duration.add(duration);
+  const succeeded = errorCode === 0;
   operationFailed.add(!succeeded);
   if (duration >= slowOperationMilliseconds && slowOperationLogs < slowOperationLogLimit) {
     slowOperationLogs += 1;
     console.warn(`slow battle operation ${JSON.stringify({
-      room_id: roomId,
+      room_id: pending.roomId,
       player_id: player.userId,
-      type: operation.type,
-      card_id: operation.cardId || null,
-      card_instance: operation.cardInstance || null,
-      target_card_id: operation.targetCardId || null,
-      target: operation.target == null ? null : operation.target,
-      version: operation.version,
+      type: pending.type,
+      card_id: pending.cardId || null,
+      card_instance: pending.cardInstance || null,
+      target_card_id: pending.targetCardId || null,
+      target: pending.target == null ? null : pending.target,
+      version: pending.version,
+      acknowledged_version: version,
       request_id: requestId,
       duration_ms: duration,
-      waiting_ms: response.timings.waiting,
-      receiving_ms: response.timings.receiving,
-      status: response.status,
-      state: response.status === 200 ? response.json('state') : null,
+      error_code: errorCode,
     })}`);
   }
-  return succeeded;
+}
+
+function markWebSocketClosed(player) {
+  player.websocketOpen = false;
+  if (player.pendingOperation) {
+    recordOperationResult(
+      player,
+      player.pendingOperation.requestId,
+      -1,
+      player.snapshot?.version || 0,
+    );
+  }
+}
+
+function sendOperation(roomId, player, operation) {
+  if (!player.websocketOpen || player.pendingOperation) return false;
+  const requestId = player.requestId++;
+  operationMetrics[operation.type].count.add(1);
+  player.pendingOperation = {
+    ...operation,
+    roomId,
+    requestId,
+    startedAt: Date.now(),
+  };
+  try {
+    player.socket.send(JSON.stringify([
+      1,
+      requestId,
+      operation.version,
+      websocketOperationTypes[operation.type],
+      operation.cardInstance || 0,
+      operation.target == null ? -1 : operation.target,
+      operation.targetType === 'hero' ? 1 : 0,
+    ]));
+  } catch {
+    websocketErrors.add(1);
+    markWebSocketClosed(player);
+    return false;
+  }
+  return true;
 }
 
 function connectEvents(roomId, player) {
@@ -256,7 +287,11 @@ function connectEvents(roomId, player) {
     null,
     { jar: player.jar, tags: { name: 'battle_events' } },
   );
-  socket.addEventListener('open', () => websocketConnections.add(1));
+  player.socket = socket;
+  socket.addEventListener('open', () => {
+    player.websocketOpen = true;
+    websocketConnections.add(1);
+  });
   socket.addEventListener('message', event => {
     try {
       const messageBytes = typeof event.data === 'string'
@@ -265,6 +300,10 @@ function connectEvents(roomId, player) {
       websocketBytesReceived.add(messageBytes);
       websocketMessageSize.add(messageBytes);
       const message = JSON.parse(event.data);
+      if (Array.isArray(message) && message[0] === 2) {
+        recordOperationResult(player, message[1], message[2], message[3]);
+        return;
+      }
       const batch = message.batch;
       const events = (batch?.events || message.events || []).map((rawItem, index) => {
         const item = Array.isArray(rawItem) ? expandCompactEvent(rawItem) : rawItem;
@@ -283,10 +322,16 @@ function connectEvents(roomId, player) {
   });
   socket.addEventListener('error', () => {
     if (!intentionalClose) websocketErrors.add(1);
+    markWebSocketClosed(player);
+  });
+  socket.addEventListener('close', () => {
+    if (!intentionalClose && player.websocketOpen) websocketErrors.add(1);
+    markWebSocketClosed(player);
   });
   return {
     close() {
       intentionalClose = true;
+      markWebSocketClosed(player);
       socket.close();
     },
   };
@@ -300,6 +345,9 @@ function makePlayer(username) {
     userId: null,
     snapshot: null,
     cards: {},
+    socket: null,
+    websocketOpen: false,
+    pendingOperation: null,
   };
 }
 
@@ -352,12 +400,18 @@ export default function (data) {
     jar: new http.CookieJar(),
     requestId: 1,
     userId: preparedBattle.first.userId,
+    socket: null,
+    websocketOpen: false,
+    pendingOperation: null,
   };
   const secondPlayer = {
     username: preparedBattle.second.username,
     jar: new http.CookieJar(),
     requestId: 1,
     userId: preparedBattle.second.userId,
+    socket: null,
+    websocketOpen: false,
+    pendingOperation: null,
   };
 
   if (!login(firstPlayer.username, firstPlayer.jar) ||
@@ -381,62 +435,55 @@ export default function (data) {
 
   const firstSocket = connectEvents(roomId, firstPlayer);
   const secondSocket = connectEvents(roomId, secondPlayer);
-  let actionRunning = false;
-
   const actionTimer = setInterval(() => {
-    if (actionRunning) return;
-    actionRunning = true;
-    try {
-      const publicSnapshot = firstPlayer.snapshot;
-      if (!publicSnapshot || publicSnapshot.room_state !== 'playing') return;
-      const actor = publicSnapshot.current_player === firstPlayer.userId
-        ? firstPlayer
-        : secondPlayer;
-      const snapshot = actor === firstPlayer ? publicSnapshot : secondPlayer.snapshot;
-      if (!snapshot) return;
+    const publicSnapshot = firstPlayer.snapshot;
+    if (!publicSnapshot || publicSnapshot.room_state !== 'playing') return;
+    const actor = publicSnapshot.current_player === firstPlayer.userId
+      ? firstPlayer
+      : secondPlayer;
+    if (!actor.websocketOpen || actor.pendingOperation) return;
+    const snapshot = actor === firstPlayer ? publicSnapshot : secondPlayer.snapshot;
+    if (!snapshot) return;
 
-      const actorState = snapshot.player_0.user_id === actor.userId
-        ? snapshot.player_0
-        : snapshot.player_1;
-      const opponentState = snapshot.player_0.user_id === actor.userId
-        ? snapshot.player_1
-        : snapshot.player_0;
-      const attacker = actorState.board.find(card => !card.exhausted && card.attack > 0);
-      const target = opponentState.board[0];
+    const actorState = snapshot.player_0.user_id === actor.userId
+      ? snapshot.player_0
+      : snapshot.player_1;
+    const opponentState = snapshot.player_0.user_id === actor.userId
+      ? snapshot.player_1
+      : snapshot.player_0;
+    const attacker = actorState.board.find(card => !card.exhausted && card.attack > 0);
+    const target = opponentState.board[0];
 
-      if (attacker && target) {
-        sendOperation(roomId, actor, {
-          type: 'attack',
-          version: snapshot.version,
-          cardInstance: attacker.instance_id,
-          cardId: attacker.card_id,
-          target: target.instance_id,
-          targetCardId: target.card_id,
-        });
-      } else if (actorState.board.length < 7) {
-        const playableCard = snapshot.my_hand.find(card =>
-          card.card_id && manaCosts[card.card_id] <= actorState.mana);
-        if (!playableCard) {
-          sendOperation(roomId, actor, {
-            type: 'end turn',
-            version: snapshot.version,
-          });
-          return;
-        }
-        sendOperation(roomId, actor, {
-          type: 'play card',
-          version: snapshot.version,
-          cardInstance: playableCard.instance_id,
-          cardId: playableCard.card_id,
-        });
-      } else {
+    if (attacker && target) {
+      sendOperation(roomId, actor, {
+        type: 'attack',
+        version: snapshot.version,
+        cardInstance: attacker.instance_id,
+        cardId: attacker.card_id,
+        target: target.instance_id,
+        targetCardId: target.card_id,
+      });
+    } else if (actorState.board.length < 7) {
+      const playableCard = snapshot.my_hand.find(card =>
+        card.card_id && manaCosts[card.card_id] <= actorState.mana);
+      if (!playableCard) {
         sendOperation(roomId, actor, {
           type: 'end turn',
           version: snapshot.version,
         });
+        return;
       }
-    } finally {
-      actionRunning = false;
+      sendOperation(roomId, actor, {
+        type: 'play card',
+        version: snapshot.version,
+        cardInstance: playableCard.instance_id,
+        cardId: playableCard.card_id,
+      });
+    } else {
+      sendOperation(roomId, actor, {
+        type: 'end turn',
+        version: snapshot.version,
+      });
     }
   }, actionIntervalMilliseconds);
 
