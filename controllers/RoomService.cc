@@ -907,7 +907,9 @@ void RoomService::syncWebSocket(
     if(!room || !matchedSubscriber)return;
     {
         std::lock_guard<std::mutex> guard(matchedSubscriber->mutex);
-        matchedSubscriber->sequence = sequence;
+        matchedSubscriber->sequence = std::max(
+            matchedSubscriber->sequence,
+            sequence);
     }
     sendWebSocketEvents(room, matchedSubscriber);
 }
@@ -929,20 +931,23 @@ bool RoomService::getWebSocketRoom(
     return true;
 }
 
-void RoomService::publishWebSocketEvents(
+bool RoomService::publishWebSocketEvents(
     int64_t roomId,
     const BattleRoom::EventVector &sharedEvents,
-    const SerializedEventArray &sharedEventArray)
+    const SerializedEventArray &sharedEventArray,
+    const drogon::WebSocketConnectionPtr &operationConnection,
+    uint64_t requestId,
+    uint64_t version)
 {
     std::shared_ptr<BattleRoom> room;
     std::vector<std::shared_ptr<WebSocketSubscriber>> subscribers;
     {
         std::lock_guard<std::mutex> guard(mutex_);
         auto roomIt = rooms.find(roomId);
-        if(roomIt == rooms.end())return;
+        if(roomIt == rooms.end())return false;
         room = roomIt->second;
         auto subscriberIt = websocketSubscribers.find(roomId);
-        if(subscriberIt == websocketSubscribers.end())return;
+        if(subscriberIt == websocketSubscribers.end())return false;
         auto &storedSubscribers = subscriberIt->second;
         storedSubscribers.erase(
             std::remove_if(
@@ -960,19 +965,30 @@ void RoomService::publishWebSocketEvents(
             storedSubscribers.end());
         subscribers = storedSubscribers;
     }
+    bool operationAcknowledged = false;
     for(const auto &subscriber : subscribers)
+    {
+        const bool isOperationConnection = operationConnection &&
+            subscriber->connectionKey == operationConnection.get();
         sendWebSocketEvents(
             room,
             subscriber,
             &sharedEvents,
-            sharedEventArray);
+            sharedEventArray,
+            isOperationConnection ? &requestId : nullptr,
+            version);
+        operationAcknowledged |= isOperationConnection;
+    }
+    return operationAcknowledged;
 }
 
 void RoomService::sendWebSocketEvents(
     const std::shared_ptr<BattleRoom> &room,
     const std::shared_ptr<WebSocketSubscriber> &subscriber,
     const BattleRoom::EventVector *sharedEvents,
-    const SerializedEventArray &sharedEventArray)
+    const SerializedEventArray &sharedEventArray,
+    const uint64_t *requestId,
+    uint64_t version)
 {
     std::lock_guard<std::mutex> guard(subscriber->mutex);
     auto connection = subscriber->connection.lock();
@@ -991,11 +1007,27 @@ void RoomService::sendWebSocketEvents(
         subscriber->sequence = std::max(
             subscriber->sequence,
             event.sequence);
+    if(events.empty() && !requestId)return;
     auto serializedEvents = sharedEventArray;
     if(!serializedEvents || !sharedEvents ||
        !have_same_events(events, *sharedEvents))
         serializedEvents = serializeEventArray(events);
-    auto message = serialize_websocket_events(*serializedEvents);
+    std::string message;
+    if(requestId)
+    {
+        message.reserve(serializedEvents->size() + 64);
+        message += "[2,";
+        message += std::to_string(*requestId);
+        message += ",0,";
+        message += std::to_string(version);
+        if(!events.empty())
+        {
+            message += ',';
+            message += *serializedEvents;
+        }
+        message += ']';
+    }
+    else message = serialize_websocket_events(*serializedEvents);
     record_websocket_message(message.size());
     connection->send(std::move(message));
 }

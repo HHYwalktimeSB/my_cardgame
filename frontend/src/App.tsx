@@ -1181,40 +1181,43 @@ function BattleRoom({
         return;
       }
 
-      currentSocket.onopen = () => {
-        currentSocket.send(JSON.stringify([0, sequenceRef.current]));
-      };
       currentSocket.onmessage = event => {
         try {
-          const result = JSON.parse(event.data) as number[] | {
+          const result = JSON.parse(event.data) as [
+            number, number, number, number, RoomEventBatch?,
+          ] | {
             events?: RoomEvent[];
             batch?: RoomEventBatch;
             snapshot?: RoomSnapshot;
           };
           if (Array.isArray(result)) {
-            if (result.length !== 4 || result[0] !== 2) throw new Error('invalid response');
-            const [, requestId, errorCode, responseVersion] = result;
+            if ((result.length !== 4 && result.length !== 5) || result[0] !== 2) {
+              throw new Error('invalid response');
+            }
+            const [, requestId, errorCode, responseVersion, batch] = result;
             const pending = pendingOperations.current.get(requestId);
-            if (!pending) return;
-            pendingOperations.current.delete(requestId);
-            const actionErrors = [
-              '',
-              'PlayerNotInRoom',
-              'RoomFinished',
-              'NotYourTurn',
-              'InvalidCard',
-              'InvalidTarget',
-              'InsufficientMana',
-              'BoardFull',
-              'StaleVersion',
-            ];
-            pending.resolve(errorCode === 0
-              ? { state: 'SUCCESS', version: responseVersion }
-              : {
-                  state: 'FAIL',
-                  version: responseVersion,
-                  action_error: actionErrors[errorCode] ?? 'UnknownError',
-                });
+            if (pending) {
+              pendingOperations.current.delete(requestId);
+              const actionErrors = [
+                '',
+                'PlayerNotInRoom',
+                'RoomFinished',
+                'NotYourTurn',
+                'InvalidCard',
+                'InvalidTarget',
+                'InsufficientMana',
+                'BoardFull',
+                'StaleVersion',
+              ];
+              pending.resolve(errorCode === 0
+                ? { state: 'SUCCESS', version: responseVersion }
+                : {
+                    state: 'FAIL',
+                    version: responseVersion,
+                    action_error: actionErrors[errorCode] ?? 'UnknownError',
+                  });
+            }
+            if (batch) enqueueEvents(expandEventBatch(batch), undefined, true);
             return;
           }
           enqueueEvents(

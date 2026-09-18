@@ -170,10 +170,13 @@ class RoomService {
         const BattleRoom::EventVector &events);
     static std::string serializeSnapshot(
         const BattleRoom::RoomSnapshot &snapshot);
-    void publishWebSocketEvents(
+    bool publishWebSocketEvents(
         int64_t roomId,
         const BattleRoom::EventVector &sharedEvents,
-        const SerializedEventArray &sharedEventArray);
+        const SerializedEventArray &sharedEventArray,
+        const drogon::WebSocketConnectionPtr &operationConnection = {},
+        uint64_t requestId = 0,
+        uint64_t version = 0);
 
   private:
     struct WebSocketSubscriber
@@ -199,7 +202,9 @@ class RoomService {
         const std::shared_ptr<BattleRoom> &room,
         const std::shared_ptr<WebSocketSubscriber> &subscriber,
         const BattleRoom::EventVector *sharedEvents = nullptr,
-        const SerializedEventArray &sharedEventArray = {});
+        const SerializedEventArray &sharedEventArray = {},
+        const uint64_t *requestId = nullptr,
+        uint64_t version = 0);
 
     std::mutex mutex_;
     int64_t room_id_counter{0};

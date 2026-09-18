@@ -2,7 +2,30 @@
 #include <cerrno>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <string>
+
+namespace
+{
+
+size_t sendQueueLimit()
+{
+    constexpr size_t defaultLimit = 256 * 1024;
+    const char *value = std::getenv("CARD_GAME_SEND_QUEUE_LIMIT_BYTES");
+    if(!value)return defaultLimit;
+    char *end = nullptr;
+    errno = 0;
+    const unsigned long long parsed = std::strtoull(value, &end, 10);
+    if(errno != 0 || end == value || *end != '\0' || parsed == 0 ||
+       parsed > std::numeric_limits<size_t>::max())
+    {
+        std::cerr << "invalid CARD_GAME_SEND_QUEUE_LIMIT_BYTES\n";
+        std::exit(1);
+    }
+    return static_cast<size_t>(parsed);
+}
+
+}
 
 int main() {
     const char *addressValue = std::getenv("CARD_GAME_LISTEN_ADDRESS");
@@ -27,6 +50,19 @@ int main() {
 
     drogon::app().addListener(address, port);
     drogon::app().loadConfigFile(configPath);
+    const size_t queueLimit = sendQueueLimit();
+    drogon::app().setConnectionCallback(
+        [queueLimit](const trantor::TcpConnectionPtr &connection) {
+            if(!connection->connected())return;
+            connection->setHighWaterMarkCallback(
+                [](const trantor::TcpConnectionPtr &slowConnection,
+                   size_t pendingBytes) {
+                    LOG_WARN << "closing slow client with " << pendingBytes
+                             << " queued response bytes";
+                    slowConnection->forceClose();
+                },
+                queueLimit);
+        });
     //drogon::app().loadConfigFile("../config.yaml");
     drogon::app().run();
     return 0;

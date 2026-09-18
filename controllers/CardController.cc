@@ -80,6 +80,8 @@ void CardController::getCardCatalog(
         root["count"] = static_cast<int>(root["cards"].size());
 
         auto resp = HttpResponse::newHttpJsonResponse(root);
+        resp->addHeader("Cache-Control", "public, max-age=3600");
+        resp->setExpiredTime(3600);
         callback(resp);
     }
     catch (const DrogonDbException &e)

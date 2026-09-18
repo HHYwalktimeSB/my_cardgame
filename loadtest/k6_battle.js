@@ -351,11 +351,13 @@ function connectEvents(roomId, player) {
       websocketBytesReceived.add(messageBytes);
       websocketMessageSize.add(messageBytes);
       const message = JSON.parse(event.data);
+      let batch;
       if (Array.isArray(message) && message[0] === 2) {
         recordOperationResult(player, message[1], message[2], message[3]);
-        return;
+        batch = message[4];
+        if (!batch) return;
       }
-      const batch = message.batch;
+      else batch = message.batch;
       const events = (batch?.events || message.events || []).map((rawItem, index) => {
         const item = Array.isArray(rawItem) ? expandCompactEvent(rawItem) : rawItem;
         return {
@@ -404,6 +406,7 @@ function makePlayer(username) {
 
 export function setup() {
   const battles = [];
+  let cardDefinitions = null;
   for (let matchNumber = 1; matchNumber <= matches; matchNumber += 1) {
     const firstPlayerNumber = playerOffset + matchNumber * 2 - 1;
     const secondPlayerNumber = playerOffset + matchNumber * 2;
@@ -412,6 +415,10 @@ export function setup() {
     if (!login(firstPlayer.username, firstPlayer.jar) ||
         !login(secondPlayer.username, secondPlayer.jar)) {
       throw new Error(`login failed while preparing match ${matchNumber}`);
+    }
+    if (!cardDefinitions) {
+      cardDefinitions = getCardDefinitions(firstPlayer.jar);
+      if (!cardDefinitions) throw new Error('card catalog unavailable');
     }
     firstPlayer.userId = getProfile(firstPlayer.jar);
     secondPlayer.userId = getProfile(secondPlayer.jar);
@@ -441,7 +448,7 @@ export function setup() {
       second: { username: secondPlayer.username, userId: secondPlayer.userId },
     });
   }
-  return { battles };
+  return { battles, cardDefinitions };
 }
 
 export default function (data) {
@@ -471,11 +478,7 @@ export default function (data) {
     return;
   }
   const roomId = preparedBattle.roomId;
-  const cardDefinitions = getCardDefinitions(firstPlayer.jar);
-  if (!cardDefinitions) {
-    initializationFailed.add(true);
-    return;
-  }
+  const cardDefinitions = data.cardDefinitions;
   const manaCosts = Object.fromEntries(
     Object.entries(cardDefinitions).map(([id, card]) => [id, Number(card.mana_cost)]),
   );

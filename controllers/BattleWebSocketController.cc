@@ -138,14 +138,23 @@ void BattleWebSocketController::handleNewMessage(
     operation.targetType = static_cast<BattleRoom::TargetType>(targetType);
 
     auto result = room->applyOperation(userId, operation);
-    send_operation_result(connection, operation.requestId, result);
-    if(result.error != BattleRoom::ActionError::None)return;
+    if(result.error != BattleRoom::ActionError::None)
+    {
+        send_operation_result(connection, operation.requestId, result);
+        return;
+    }
 
     auto serializedEvents = RoomService::serializeEventArray(
         result.generatedEvents);
     if(room->isFinished())service.scheduleFinishedRoomCleanup(roomId);
-    service.publishWebSocketEvents(
-        roomId, result.generatedEvents, serializedEvents);
+    if(!service.publishWebSocketEvents(
+           roomId,
+           result.generatedEvents,
+           serializedEvents,
+           connection,
+           operation.requestId,
+           result.version))
+        send_operation_result(connection, operation.requestId, result);
 }
 
 void BattleWebSocketController::handleConnectionClosed(

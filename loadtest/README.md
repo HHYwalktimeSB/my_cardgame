@@ -38,6 +38,8 @@ The setup phase creates each match sequentially so concurrently starting VUs do
 not get paired with players from another VU. The default thresholds require less
 than 1% failed operations and snapshots, p95 operation latency below 200 ms, all
 expected WebSocket connections, and no WebSocket errors.
+The public card catalog is fetched once in setup and shared with all VUs, so its
+static payload does not distort per-player initialization traffic.
 
 ## Find player capacity
 
@@ -92,6 +94,11 @@ WebSocket traffic is reported as `battle_websocket_bytes_received` and
 `/metrics` endpoint exposes event-payload
 `battle_websocket_payload_bytes_total` and `battle_websocket_messages_total`
 counters for measuring outbound payload independently of k6 HTTP traffic.
+
+The server closes a client when its TCP response queue first exceeds 256 KiB,
+preventing slow WebSocket or HTTP clients from retaining an unbounded send
+queue. Override the limit with `CARD_GAME_SEND_QUEUE_LIMIT_BYTES` when testing
+different network conditions.
 
 `MATCH_STEPS` counts matches, so the player count is twice each value. A locally
 installed `k6` is used when available; otherwise the script runs
