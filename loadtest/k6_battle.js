@@ -11,6 +11,7 @@ const durationSeconds = Number(__ENV.DURATION || 60);
 const actionIntervalMilliseconds = Number(__ENV.ACTION_INTERVAL_MS || 750);
 const slowOperationMilliseconds = Number(__ENV.SLOW_OPERATION_MS || 1000);
 const slowOperationLogLimit = Number(__ENV.SLOW_OPERATION_LOG_LIMIT || 5);
+const deathrattleP95Milliseconds = Number(__ENV.DEATHRATTLE_P95_MS || 1000);
 const password = __ENV.PASSWORD || 'stress-pass';
 const playerOffset = Number(__ENV.PLAYER_OFFSET || 0);
 
@@ -59,11 +60,17 @@ const operationErrorNames = [
   'stale_version',
 ];
 const websocketErrors = new Counter('battle_websocket_errors');
+const websocketHandshakeFailures = new Counter('battle_websocket_handshake_failures');
+const websocketUnexpectedCloses = new Counter('battle_websocket_unexpected_closes');
 const websocketEvents = new Counter('battle_websocket_events');
 const websocketConnections = new Counter('battle_websocket_connections');
 const websocketBytesReceived = new Counter('battle_websocket_bytes_received');
 const websocketMessageSize = new Trend('battle_websocket_message_size', true);
+const deathrattleExchanges = new Counter('battle_deathrattle_exchange_count');
+const deathrattleMinionDeaths = new Counter('battle_deathrattle_minion_deaths');
+const deathrattleEffectEvents = new Counter('battle_deathrattle_effect_events');
 let slowOperationLogs = 0;
+let websocketDiagnosticLogs = 0;
 
 const websocketOperationTypes = {
   'play card': 0,
@@ -106,6 +113,11 @@ export const options = {
     battle_initialization_failed: ['rate<0.01'],
     battle_operation_failed: ['rate<0.01'],
     battle_operation_duration: ['p(95)<200'],
+    battle_operation_attack_count: [`count>=${matches}`],
+    battle_operation_attack_duration: [`p(95)<${deathrattleP95Milliseconds}`],
+    battle_deathrattle_exchange_count: [`count>=${matches}`],
+    battle_deathrattle_minion_deaths: [`count>=${matches * 2}`],
+    battle_deathrattle_effect_events: [`count>=${matches * 64}`],
     battle_snapshot_failed: ['rate<0.01'],
     battle_websocket_errors: ['count<1'],
     battle_websocket_connections: [`count>=${matches * 2}`],
@@ -237,7 +249,7 @@ function getSnapshot(roomId, jar) {
     tags: { name: 'battle_snapshot' },
   });
   snapshotFailed.add(response.status !== 200);
-  return response.status === 200 ? response.json() : null;
+  return response.status === 200 ? JSON.parse(response.body) : null;
 }
 
 function recordOperationResult(player, requestId, errorCode, version) {
@@ -332,6 +344,8 @@ function sendOperation(roomId, player, operation) {
 
 function connectEvents(roomId, player) {
   let intentionalClose = false;
+  let opened = false;
+  let connectionFailureRecorded = false;
   const sequence = player.snapshot?.last_sequence || 0;
   const socket = new WebSocket(
     `${websocketBaseUrl}/battleroom/ws?room_id=${roomId}&sequence=${sequence}`,
@@ -340,6 +354,7 @@ function connectEvents(roomId, player) {
   );
   player.socket = socket;
   socket.addEventListener('open', () => {
+    opened = true;
     player.websocketOpen = true;
     websocketConnections.add(1);
   });
@@ -352,7 +367,11 @@ function connectEvents(roomId, player) {
       websocketMessageSize.add(messageBytes);
       const message = JSON.parse(event.data);
       let batch;
+      let acknowledgedOperation = null;
+      let operationSucceeded = false;
       if (Array.isArray(message) && message[0] === 2) {
+        acknowledgedOperation = player.pendingOperation;
+        operationSucceeded = message[2] === 0;
         recordOperationResult(player, message[1], message[2], message[3]);
         batch = message[4];
         if (!batch) return;
@@ -367,18 +386,47 @@ function connectEvents(roomId, player) {
         };
       });
       websocketEvents.add(events.length);
+      if (operationSucceeded && acknowledgedOperation?.type === 'attack') {
+        const minionDeaths = events.filter(item => item.type === 'minion_dead').length;
+        const effectEvents = events.filter(item => item.type.startsWith('effect_')).length;
+        if (minionDeaths >= 2) deathrattleExchanges.add(1);
+        deathrattleMinionDeaths.add(minionDeaths);
+        deathrattleEffectEvents.add(effectEvents);
+      }
       if (message.snapshot) player.snapshot = message.snapshot;
       else if (player.snapshot) applyEvents(player.snapshot, events, player.cards, player.userId);
     } catch {
       websocketErrors.add(1);
     }
   });
-  socket.addEventListener('error', () => {
+  socket.addEventListener('error', event => {
     if (!intentionalClose) websocketErrors.add(1);
+    if (!intentionalClose && !opened) websocketHandshakeFailures.add(1);
+    connectionFailureRecorded = true;
+    if (!intentionalClose && websocketDiagnosticLogs < slowOperationLogLimit) {
+      websocketDiagnosticLogs += 1;
+      console.warn(`websocket error ${JSON.stringify({
+        room_id: roomId,
+        player_id: player.userId,
+        phase: opened ? 'open' : 'handshake',
+        error: event?.error == null ? null : String(event.error),
+      })}`);
+    }
     markWebSocketClosed(player);
   });
-  socket.addEventListener('close', () => {
-    if (!intentionalClose && player.websocketOpen) websocketErrors.add(1);
+  socket.addEventListener('close', event => {
+    if (!intentionalClose && opened) websocketUnexpectedCloses.add(1);
+    if (!intentionalClose && !connectionFailureRecorded) websocketErrors.add(1);
+    if (!intentionalClose && websocketDiagnosticLogs < slowOperationLogLimit) {
+      websocketDiagnosticLogs += 1;
+      console.warn(`websocket close ${JSON.stringify({
+        room_id: roomId,
+        player_id: player.userId,
+        phase: opened ? 'open' : 'handshake',
+        code: event?.code ?? null,
+        reason: event?.reason ?? null,
+      })}`);
+    }
     markWebSocketClosed(player);
   });
   return {
@@ -522,7 +570,7 @@ export default function (data) {
         target: target.instance_id,
         targetCardId: target.card_id,
       });
-    } else if (actorState.board.length < 7) {
+    } else if (actorState.board.length === 0) {
       const playableCard = snapshot.my_hand.find(card =>
         card.card_id && manaCosts[card.card_id] <= actorState.mana);
       if (!playableCard) {

@@ -14,8 +14,10 @@ psql postgresql://cardgame_user:cardgame_password@127.0.0.1/cardgame_db \
 ```
 
 This creates 15 zero-cost 1/1 minions, two copies of each per player, and a
-30-card deck. Every minion produces 16 battlecry effect events. When two minions
-trade, their deathrattles enqueue another 64 effect events in total.
+30-card deck. Every minion produces 16 battlecry effect events. The workload
+keeps one minion on each side and trades them as soon as the active minion is
+ready. Each trade kills both minions and enqueues another 64 deathrattle effect
+events in total.
 
 ## Run
 
@@ -36,8 +38,10 @@ controls the delay between operations and defaults to 750 ms.
 
 The setup phase creates each match sequentially so concurrently starting VUs do
 not get paired with players from another VU. The default thresholds require less
-than 1% failed operations and snapshots, p95 operation latency below 200 ms, all
-expected WebSocket connections, and no WebSocket errors.
+than 1% failed operations and snapshots, p95 operation latency below 200 ms,
+attack/deathrattle p95 below 1000 ms, at least one successful two-minion
+deathrattle exchange per match, all expected WebSocket connections, and no
+WebSocket errors. Override the deathrattle limit with `DEATHRATTLE_P95_MS`.
 The public card catalog is fetched once in setup and shared with all VUs, so its
 static payload does not distort per-player initialization traffic.
 
@@ -88,6 +92,11 @@ battle operations. Server rejections are split into
 before acknowledgement is counted as `battle_operation_transport_failures`.
 Failed operations are also written to the bounded diagnostic log even when they
 complete faster than `SLOW_OPERATION_MS`.
+
+WebSocket failures are split into handshake failures (the connection never
+opened) and unexpected closes after opening. Their bounded diagnostic entries
+include the room, player, phase, close code, and close reason when k6 exposes
+them.
 
 WebSocket traffic is reported as `battle_websocket_bytes_received` and
 `battle_websocket_message_size`, including operation acknowledgements. The server

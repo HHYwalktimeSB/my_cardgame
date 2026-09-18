@@ -8,6 +8,7 @@ duration=${DURATION:-60}
 action_interval_ms=${ACTION_INTERVAL_MS:-750}
 slow_operation_ms=${SLOW_OPERATION_MS:-1000}
 slow_operation_log_limit=${SLOW_OPERATION_LOG_LIMIT:-5}
+deathrattle_p95_ms=${DEATHRATTLE_P95_MS:-1000}
 k6_image=${K6_IMAGE:-grafana/k6:0.54.0}
 results_dir=${RESULTS_DIR:-"$repo_dir/loadtest/results"}
 : "${RUN_ID:?set RUN_ID to the value used by prepare-capacity.sh}"
@@ -40,6 +41,7 @@ run_k6()
             -e "ACTION_INTERVAL_MS=$action_interval_ms" \
             -e "SLOW_OPERATION_MS=$slow_operation_ms" \
             -e "SLOW_OPERATION_LOG_LIMIT=$slow_operation_log_limit" \
+            -e "DEATHRATTLE_P95_MS=$deathrattle_p95_ms" \
             --console-output "$results_dir/${run_id}.log" \
             --summary-export "$summary_file" \
             "$repo_dir/loadtest/k6_battle.js"
@@ -57,6 +59,7 @@ run_k6()
             -e "ACTION_INTERVAL_MS=$action_interval_ms" \
             -e "SLOW_OPERATION_MS=$slow_operation_ms" \
             -e "SLOW_OPERATION_LOG_LIMIT=$slow_operation_log_limit" \
+            -e "DEATHRATTLE_P95_MS=$deathrattle_p95_ms" \
             --console-output "/results/${run_id}.log" \
             --summary-export "/results/${run_id}.json" \
             /scripts/k6_battle.js
